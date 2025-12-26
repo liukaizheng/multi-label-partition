@@ -6,7 +6,7 @@
             "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/build/multi-label-partition",
-            "args": [],
+            "args": ["-m", "cube_stamped.off"],
             "cwd": "${workspaceFolder}/build",
             "env": {},
             "stopOnEntry": false,

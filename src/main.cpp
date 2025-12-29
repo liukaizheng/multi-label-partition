@@ -19,18 +19,16 @@
 #include <boost/functional/hash.hpp>
 
 #include <CLI/CLI.hpp>
-
-#include <gpf/ids.hpp>
-#include <gpf/mesh.hpp>
+#include "tet_mesh.hpp"
 
 #include <fstream>
-#include <gpf/surface_mesh.hpp>
 #include <igl/readOBJ.h>
 #include <igl/copyleft/tetgen/tetrahedralize.h>
 #include <format>
 #include <print>
 #include <ranges>
 #include <unordered_map>
+#include <vector>
 
 using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
 using Point_2 = Kernel::Point_2;
@@ -66,17 +64,6 @@ using SpMat = Eigen::SparseMatrix<double, Eigen::ColMajor>;
 using RowSpMat = Eigen::SparseMatrix<double, Eigen::RowMajor>;
 
 auto view_ts = std::views::transform;
-
-struct VertexProp {
-    std::array<double, 3> pt;
-    std::vector<double> distances;
-};
-
-struct FaceProp {
-    std::array<std::size_t, 2> cells;
-};
-
-using TetMesh = gpf::SurfaceMesh<VertexProp, gpf::Empty, gpf::Empty, FaceProp>;
 
 void write_msh(const std::string& name, const VMat& V, const TMat& T) {
     std::ofstream out(name);
@@ -177,6 +164,7 @@ auto build_tet_mesh(
     }
 
     std::vector<std::array<std::size_t, 2>> face_tets(faces.size(), {{gpf::kInvalidIndex, gpf::kInvalidIndex}});
+    std::vector<std::size_t> signed_tet_faces;
     for (std::size_t i = 0; i < TT.rows(); ++i) {
         auto t = TT.row(i);
         for (auto&& face : {
@@ -188,7 +176,7 @@ auto build_tet_mesh(
             auto iter = face_index_map.emplace(hash_key(face), faces.size());
             if (iter.second) {
                 faces.emplace_back(std::move(face));
-                face_tets[iter.first->second] = {i, gpf::kInvalidIndex};
+                face_tets.emplace_back(std::array<std::size_t, 2>{{i, gpf::kInvalidIndex}});
             } else {
                 if (face_tets[iter.first->second][0] == gpf::kInvalidIndex) {
                     face_tets[iter.first->second][0] = i;
@@ -198,7 +186,7 @@ auto build_tet_mesh(
             }
         }
     }
-    auto mesh = TetMesh::new_in(std::move(faces));
+    auto mesh = tet_mesh::TetMesh::new_in(std::move(faces));
     for (auto v : mesh.vertices()) {
         auto& p = v.data().property.pt;
         auto q = TV.row(v.id.idx).eval();
@@ -214,9 +202,9 @@ auto build_tet_mesh(
     return mesh;
 }
 
-auto setup_neg_distance(TetMesh& mesh, const std::vector<std::vector<gpf::FaceId>>& label_face_groups) {
-    std::vector<Tree> trees;
-    trees.reserve(label_face_groups.size());
+auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<gpf::FaceId>>& label_face_groups) {
+    std::vector<std::vector<Triangle>> triangle_groups;
+    triangle_groups.reserve(label_face_groups.size());
     for (const auto& faces : label_face_groups) {
         std::vector<Triangle> triangles;
         triangles.reserve(faces.size());
@@ -229,6 +217,12 @@ auto setup_neg_distance(TetMesh& mesh, const std::vector<std::vector<gpf::FaceId
                 | std::ranges::to<std::vector>();
             triangles.emplace_back(std::move(points[0]), std::move(points[1]), std::move(points[2]));
         }
+        triangle_groups.emplace_back(std::move(triangles));
+    }
+
+    std::vector<Tree> trees;
+    trees.reserve(label_face_groups.size());
+    for (const auto& triangles : triangle_groups) {
         trees.emplace_back(triangles.begin(), triangles.end());
         trees.back().accelerate_distance_queries();
     }
@@ -241,7 +235,6 @@ auto setup_neg_distance(TetMesh& mesh, const std::vector<std::vector<gpf::FaceId
             d = -std::sqrt(tree.squared_distance(pt));
         }
     }
-    const auto a = 2;
 }
 
 int main(int argc, char* argv[]) {

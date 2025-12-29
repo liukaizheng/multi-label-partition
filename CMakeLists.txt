@@ -38,3 +38,11 @@ target_link_libraries(multi-label-partition PRIVATE
 target_include_directories(multi-label-partition PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+target_compile_options(multi-label-partition PRIVATE
+    -fsanitize=address -fno-omit-frame-pointer
+)
+
+target_link_options(multi-label-partition PRIVATE
+    -fsanitize=address
+)

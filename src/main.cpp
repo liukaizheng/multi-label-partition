@@ -164,9 +164,11 @@ auto build_tet_mesh(
     }
 
     std::vector<std::array<std::size_t, 2>> face_tets(faces.size(), {{gpf::kInvalidIndex, gpf::kInvalidIndex}});
-    std::vector<std::size_t> signed_tet_faces;
+    std::vector<std::array<std::size_t, 4>> signed_tet_faces;
     for (std::size_t i = 0; i < TT.rows(); ++i) {
         auto t = TT.row(i);
+        std::array<std::size_t, 4> tet_faces;
+        std::size_t idx = 0;
         for (auto&& face : {
             std::array<std::size_t, 3>{{t[2], t[1], t[3]}},
             std::array<std::size_t, 3>{{t[0], t[2], t[3]}},
@@ -177,11 +179,14 @@ auto build_tet_mesh(
             if (iter.second) {
                 faces.emplace_back(std::move(face));
                 face_tets.emplace_back(std::array<std::size_t, 2>{{i, gpf::kInvalidIndex}});
+                tet_faces[idx] = gpf::oriented_index(iter.first->second, false);
             } else {
                 if (face_tets[iter.first->second][0] == gpf::kInvalidIndex) {
                     face_tets[iter.first->second][0] = i;
+                    tet_faces[idx] = gpf::oriented_index(iter.first->second, false);
                 } else {
                     face_tets[iter.first->second][1] = i;
+                    tet_faces[idx] = gpf::oriented_index(iter.first->second, true);
                 }
             }
         }

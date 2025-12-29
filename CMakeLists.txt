@@ -14,9 +14,10 @@ set(CGAL_DO_NOT_WARN_ABOUT_CMAKE_BUILD_TYPE ON)
 find_package(CGAL REQUIRED)
 
 CPMAddPackage("gh:CLIUtils/CLI11#v2.6.1")
-CPMAddPackage("gh:liukaizheng/mesh#main")
-add_executable(multi-label-partition
-    src/main.cpp
+# CPMAddPackage("gh:liukaizheng/mesh#main")
+CPMAddPackage(
+    NAME mesh
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../mesh
 )
 CPMAddPackage(
     NAME libigl
@@ -26,6 +27,9 @@ CPMAddPackage(
         "LIBIGL_COPYLEFT_TETGEN ON"
 )
 
+add_executable(multi-label-partition
+    src/main.cpp
+)
 target_compile_features(multi-label-partition PRIVATE cxx_std_23)
 target_link_libraries(multi-label-partition PRIVATE
     CGAL::CGAL

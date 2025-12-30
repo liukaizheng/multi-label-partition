@@ -27,9 +27,13 @@ CPMAddPackage(
         "LIBIGL_COPYLEFT_TETGEN ON"
 )
 
+CPMAddPackage("gh:BowenFu/matchit.cpp#main")
+
 add_executable(multi-label-partition
     src/main.cpp
+    src/material_interface.cpp
 )
+
 target_compile_features(multi-label-partition PRIVATE cxx_std_23)
 target_link_libraries(multi-label-partition PRIVATE
     CGAL::CGAL
@@ -38,6 +42,7 @@ target_link_libraries(multi-label-partition PRIVATE
     gpf::mesh
     igl::core
     igl_copyleft::tetgen
+    matchit
 )
 target_include_directories(multi-label-partition PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include

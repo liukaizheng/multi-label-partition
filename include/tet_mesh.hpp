@@ -9,6 +9,8 @@ namespace tet_mesh {
 
 struct Tet {
     std::array<gpf::VertexId, 4> vertices;
+    std::array<std::size_t, 4> faces;
+    std::array<gpf::EdgeId, 6> edges;
 };
 
 struct VertexProp {

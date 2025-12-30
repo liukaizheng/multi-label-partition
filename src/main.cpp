@@ -19,7 +19,12 @@
 #include <boost/functional/hash.hpp>
 
 #include <CLI/CLI.hpp>
+#include <gpf/handles.hpp>
+#include <gpf/ids.hpp>
+#include <gpf/utils.hpp>
+
 #include "tet_mesh.hpp"
+#include "material_interface.hpp"
 
 #include <fstream>
 #include <igl/readOBJ.h>
@@ -63,7 +68,8 @@ using IVec = Eigen::Matrix<std::size_t, Eigen::Dynamic, 1>;
 using SpMat = Eigen::SparseMatrix<double, Eigen::ColMajor>;
 using RowSpMat = Eigen::SparseMatrix<double, Eigen::RowMajor>;
 
-auto view_ts = std::views::transform;
+namespace ranges = std::ranges;
+namespace views = std::views;
 
 void write_msh(const std::string& name, const VMat& V, const TMat& T) {
     std::ofstream out(name);
@@ -133,11 +139,11 @@ auto read_colored_mesh(const std::string& file_name) {
         std::move(faces),
         std::move(color_to_face_map)
             | std::views::elements<1>
-            | view_ts([](auto&& faces) {
-                return faces | view_ts([](const auto fid) {
-                    return gpf::FaceId{fid}; }) | std::ranges::to<std::vector>();
+            | views::transform([](auto&& faces) {
+                return faces | views::transform([](const auto fid) {
+                    return gpf::FaceId{fid}; }) | ranges::to<std::vector>();
                 })
-            | std::ranges::to<std::vector>()
+            | ranges::to<std::vector>()
     );
 }
 
@@ -164,7 +170,7 @@ auto build_tet_mesh(
     }
 
     std::vector<std::array<std::size_t, 2>> face_tets(faces.size(), {{gpf::kInvalidIndex, gpf::kInvalidIndex}});
-    std::vector<std::array<std::size_t, 4>> signed_tet_faces;
+    std::vector<tet_mesh::Tet> tets;
     for (std::size_t i = 0; i < TT.rows(); ++i) {
         auto t = TT.row(i);
         std::array<std::size_t, 4> tet_faces;
@@ -189,9 +195,22 @@ auto build_tet_mesh(
                     tet_faces[idx] = gpf::oriented_index(iter.first->second, true);
                 }
             }
+            idx += 1;
         }
+        tets.emplace_back(tet_mesh::Tet{.vertices{gpf::VertexId{t[0]}, gpf::VertexId{t[1]}, gpf::VertexId{t[2]}, gpf::VertexId{t[3]}}, .faces{std::move(tet_faces)}});
     }
     auto mesh = tet_mesh::TetMesh::new_in(std::move(faces));
+    for (auto& tet : tets) {
+        const auto& vertices = tet.vertices;
+        auto& edges = tet.edges;
+        std:size_t idx = 0;
+        for (std::size_t i = 0; i < 3; i++) {
+            for (std::size_t j = i + 1; j < 4; j++) {
+                const auto eid = mesh.e_from_vertices(vertices[i], vertices[j]);
+                edges[idx++] = eid;
+            }
+        }
+    }
     for (auto v : mesh.vertices()) {
         auto& p = v.data().property.pt;
         auto q = TV.row(v.id.idx).eval();
@@ -204,7 +223,7 @@ auto build_tet_mesh(
         f.data().property.cells = std::move(face_tets[f.id.idx]);
     }
 
-    return mesh;
+    return std::make_pair(std::move(mesh), std::move(tets));
 }
 
 auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<gpf::FaceId>>& label_face_groups) {
@@ -216,10 +235,10 @@ auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<g
         for (const auto fid : faces) {
             auto he = mesh.face(fid).halfedge();
             auto points = mesh.face(fid).halfedges()
-                | view_ts([] (auto he) {
+                | views::transform([] (auto he) {
                     auto& p = he.to().data().property.pt;
                     return Point_3(p[0], p[1], p[2]); })
-                | std::ranges::to<std::vector>();
+                | ranges::to<std::vector>();
             triangles.emplace_back(std::move(points[0]), std::move(points[1]), std::move(points[2]));
         }
         triangle_groups.emplace_back(std::move(triangles));
@@ -236,7 +255,7 @@ auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<g
         const auto& p = v.data().property.pt;
         dists.resize(trees.size());
         Point_3 pt(p[0], p[1], p[2]);
-        for (auto [d, tree] : std::ranges::zip_view(dists, trees)) {
+        for (auto [d, tree] : ranges::zip_view(dists, trees)) {
             d = -std::sqrt(tree.squared_distance(pt));
         }
     }
@@ -267,8 +286,9 @@ int main(int argc, char* argv[]) {
     FMat TF;
 
     igl::copyleft::tetgen::tetrahedralize(V, F, "pq1.414Y", TV, TT, TF);
-    auto tet_mesh = build_tet_mesh(TV, TT, TF);
+    auto [tet_mesh, tets] = build_tet_mesh(TV, TT, TF);
     setup_neg_distance(tet_mesh, label_face_groups);
+    do_material_interface(tets, tet_mesh);
     write_msh("123.obj", TV, TT);
     return 0;
 }

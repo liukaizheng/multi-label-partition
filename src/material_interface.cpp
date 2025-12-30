@@ -1,7 +1,12 @@
 #include "material_interface.hpp"
+#include "gpf/ids.hpp"
 #include "gpf/mesh.hpp"
 #include "gpf/surface_mesh.hpp"
 #include "tet_mesh.hpp"
+
+#include <implicit_predicates/common.h>
+#include <implicit_predicates/implicit_predicates.h>
+
 #include <Eigen/Dense>
 #include <algorithm>
 #include <ranges>
@@ -36,7 +41,7 @@ struct MaterialInterface {
     MaterialInterface();
     MaterialInterface(const MaterialInterface&) = default;
 
-    void compute_vert_orientations(const std::size_t mid);
+    implicit_predicates::Orientation compute_vert_orientations(const std::array<double, 4>& material, const gpf::VertexId vid);
     void add_material(const std::array<double, 4>& material);
 };
 
@@ -69,8 +74,86 @@ void MaterialInterface::add_material(const std::array<double, 4>& material) {
     }
 }
 
-void MaterialInterface::compute_vert_orientations(const std::size_t mid) {
+implicit_predicates::Orientation MaterialInterface::compute_vert_orientations(const std::array<double, 4>& material, const gpf::VertexId vid) {
+    constexpr std::array<std::array<std::size_t, 5>, 15> M = {{
+        {{4, 0, 1, 2, 3}}, //  0: (0, 0, 0, 0)
+        {{3, 1, 2, 3, 0}}, //  1: (1, 0, 0, 0)
+        {{3, 0, 2, 3, 0}}, //  2: (0, 1, 0, 0)
+        {{2, 2, 3, 0, 0}}, //  3: (1, 1, 0, 0)
+        {{3, 0, 1, 3, 0}}, //  4: (0, 0, 1, 0)
+        {{2, 1, 3, 0, 0}}, //  5: (1, 0, 1, 0)
+        {{2, 0, 3, 0, 0}}, //  6: (0, 1, 1, 0)
+        {{1, 3, 0, 0, 0}}, //  7: (1, 1, 1, 0)
+        {{3, 0, 1, 2, 0}}, //  8: (0, 0, 0, 1)
+        {{2, 1, 2, 0, 0}}, //  9: (1, 0, 0, 1)
+        {{2, 0, 2, 0, 0}}, // 10: (0, 1, 0, 1)
+        {{1, 2, 0, 0, 0}}, // 11: (1, 1, 0, 1)
+        {{2, 0, 1, 0, 0}}, // 12: (0, 0, 1, 1)
+        {{1, 1, 0, 0, 0}}, // 13: (1, 0, 1, 1)
+        {{1, 0, 0, 0, 0}}, // 14: (0, 1, 1, 1)
+    }};
 
+    std::size_t vertex_flags = 0;
+    std::vector<std::size_t> material_indices;
+    for (const auto i : mesh.vertex(vid).data().property.materials) {
+        if (i < 4) {
+            vertex_flags |= (1 << i);
+        } else {
+            material_indices.push_back(i - 4);
+        }
+    }
+
+    auto compute_sign_0 = [this, &material, &material_indices](const std::size_t i) {
+        const auto v0 = material[i];
+        const auto v = materials[material_indices[0]][i];
+        if (v > v0) {
+            return implicit_predicates::Orientation::POSITIVE;
+        } else if (v < v0) {
+            return implicit_predicates::Orientation::NEGATIVE;
+        } else {
+            return implicit_predicates::Orientation::ZERO;
+        }
+    };
+
+    auto compute_sign_1 = [this, &material, &material_indices](const std::size_t i, const std::size_t j) {
+        const auto& m1 = materials[material_indices[0]];
+        const auto& m2 = materials[material_indices[1]];
+        double tm1[2] = {m1[i], m1[j]};
+        double tm2[2] = {m2[i], m2[j]};
+        double tm[2] = {material[i], material[j]};
+        return implicit_predicates::mi_orient1d(tm1, tm2, tm);
+    };
+
+    auto compute_sign_2 = [this, &material, &material_indices](const std::size_t i, const std::size_t j, const std::size_t k) {
+        const auto& m1 = materials[material_indices[0]];
+        const auto& m2 = materials[material_indices[1]];
+        const auto& m3 = materials[material_indices[2]];
+        double tm1[3] = {m1[i], m1[j], m1[k]};
+        double tm2[3] = {m2[i], m2[j], m2[k]};
+        double tm3[3] = {m3[i], m3[j], m3[k]};
+        double tm[3] = {material[i], material[j], material[k]};
+        return implicit_predicates::mi_orient2d(tm1, tm2, tm3, tm);
+    };
+
+    auto compute_sign_3 = [this, &material, &material_indices]() {
+        const auto& m1 = materials[material_indices[0]];
+        const auto& m2 = materials[material_indices[1]];
+        const auto& m3 = materials[material_indices[2]];
+        const auto& m4 = materials[material_indices[3]];
+        return implicit_predicates::mi_orient3d(m1.data(), m2.data(), m3.data(), m4.data(), material.data());
+    };
+
+    const auto& shape = M[vertex_flags];
+    if (shape[0] == 1) {
+        return compute_sign_0(shape[1]);
+    } else if (shape[0] == 2) {
+        return compute_sign_1(shape[1], shape[2]);
+    } else if (shape[0] == 3) {
+        return compute_sign_2(shape[1], shape[2], shape[3]);
+    } else if (shape[0] == 4) {
+        return compute_sign_3();
+    }
+    return implicit_predicates::Orientation::INVALID;
 }
 
 void do_material_interface(

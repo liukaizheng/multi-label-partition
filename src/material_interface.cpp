@@ -12,6 +12,23 @@
 #include <ranges>
 #include <unordered_set>
 
+#include <fstream>
+auto write_mesh(const std::string& name, const std::vector<std::array<double, 3>>& uv, const std::vector<std::vector<std::size_t>>& F)
+{
+    std::ofstream file(name);
+    for (Eigen::Index i = 0; i < uv.size(); ++i) {
+        file << "v " << uv[i][0] << " " << uv[i][1] <<" " << uv[i][2] << "\n";
+    }
+    for (Eigen::Index i = 0; i < F.size(); ++i) {
+        file << "f";
+        for (Eigen::Index j = 0; j < F[i].size(); ++j) {
+            file << "  " << F[i][j] + 1;
+        }
+        file << "\n";
+    }
+    file.close();
+}
+
 namespace ranges = std::ranges;
 namespace views = std::views;
 
@@ -29,6 +46,7 @@ struct EdgeProp {
 struct FaceProp {
     std::array<std::size_t, 2> materials{{gpf::kInvalidIndex, gpf::kInvalidIndex}};
     std::array<std::size_t, 2> cells{{0, gpf::kInvalidIndex}};
+    std::size_t pid{gpf::kInvalidIndex};
 };
 
 struct Cell {
@@ -38,6 +56,11 @@ struct Cell {
 
 using Mesh = gpf::SurfaceMesh<VertexProp, gpf::Empty, EdgeProp, FaceProp>;
 
+struct ExtractInfo {
+    std::vector<std::array<double, 3>> points;
+    std::vector<std::vector<std::size_t>> faces;
+};
+
 struct MaterialInterface {
     Mesh mesh;
     std::vector<Cell> cells;
@@ -46,9 +69,10 @@ struct MaterialInterface {
     MaterialInterface();
     MaterialInterface(const MaterialInterface&) = default;
 
-    double compute_vert_orientations(const std::array<double, 4>& material, const gpf::VertexId vid);
-    void add_material(std::array<double, 4>&& material);
+    void add_material(const std::array<double, 4>& material);
+    void extract(ExtractInfo& info, const double* corners) noexcept;
 private:
+    double compute_vert_orientations(const std::array<double, 4>& material, const gpf::VertexId vid);
     void split_edges(const std::size_t mid) noexcept;
     void split_faces(const std::size_t mid) noexcept;
     void split_cells(const std::size_t mid) noexcept;
@@ -72,41 +96,112 @@ MaterialInterface::MaterialInterface() {
         material.back() = 4;
     }
     for (auto f : mesh.faces()) {
-        auto& material = f.data().property.materials;
-        material[0] = f.id.idx;
-        material[1] = 4;
+        auto& prop = f.data().property;
+        prop.materials[0] = f.id.idx;
+        prop.materials[1] = 4;
+        prop.pid = f.id.idx;
     }
 
     cells = { Cell{.faces{0, 2, 4, 6}} };
 }
 
-void MaterialInterface::add_material(std::array<double, 4>&& material) {
+void MaterialInterface::add_material(const std::array<double, 4>& material) {
     auto mid = materials.size();
-    materials.emplace_back(std::move(material));
+    materials.emplace_back(material);
     if (materials.size() == 1) {
         return;
     }
 
     int n_pos = 0;
     int n_neg = 0;
+    int n_zero = 0;
     for (const auto v :mesh.vertices()) {
         double ori = compute_vert_orientations(materials[mid], v.id);
         if (ori > 0) {
             n_pos++;
         } else if (ori < 0) {
             n_neg++;
+        } else {
+            n_zero++;
         }
     }
 
-    if (auto n_verts = mesh.n_vertices(); (n_pos == 0 && n_verts - n_neg < 3) || (n_neg == 0 && n_verts - n_pos < 3)) {
+    mid += 4;
+    if (n_neg == 0 || n_pos == 0) {
+        if (n_zero >= 3) {
+            for (auto face : mesh.faces()) {
+                if (ranges::all_of(face.halfedges(), [] (auto he) { return he.to().data().property.ori[0] == 0.0;}) ) {
+                    auto& f_prop = face.data().property;
+                    assert(f_prop.materials[0] < 4);
+                    f_prop.materials[0] = mid;
+                    const auto pid = f_prop.pid;
+
+                    for (auto he : face.halfedges()) {
+                        auto& v_mats = he.to().data().property.materials;
+                        auto& e_mats = he.edge().data().property.materials;
+                        auto v_it = ranges::find_if(v_mats, [pid](std::size_t m) { return m == pid; });
+                        if (v_it != ranges::end(v_mats)) {
+                            *v_it = mid;
+                        }
+                        auto e_it = ranges::find_if(e_mats, [pid](std::size_t m) { return m == pid; });
+                        if (e_it != ranges::end(e_mats)) {
+                            *e_it = mid;
+                        }
+                    }
+
+                    // Because the sorting is done before adding materials,
+                    // the latest material cannot be overwhelming of the previous ones.
+                    // So there is no cell generated for the latest material
+                }
+            }
+        }
         return;
     }
 
-    mid += 4;
+
     split_edges(mid);
     split_faces(mid);
     split_cells(mid);
     const auto a = 2;
+}
+void MaterialInterface::extract(ExtractInfo& info, const double* corners) noexcept {
+    std::vector<std::size_t> point_indices(mesh.n_vertices_capacity(), gpf::kInvalidIndex);
+    auto cnt = info.points.size();
+    for (const auto face : mesh.faces()) {
+        if (ranges::all_of(face.data().property.materials, [](auto m) { return m >= 4;})) {
+            for (const auto he : face.halfedges()) {
+                auto vid = he.to().id.idx;
+                if (point_indices[vid] == gpf::kInvalidIndex) {
+                    point_indices[he.to().id.idx] = cnt++;
+                }
+            }
+        }
+    }
+
+    using Mat = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
+    Mat V(point_indices.size(), 3);
+    V.topRows(4) = Mat::ConstMapType(corners, 4, 3);
+    for (std::size_t i = 4; i < point_indices.size(); ++i) {
+        if (point_indices[i] != gpf::kInvalidIndex) {
+            const auto& v_props = mesh.vertex_data(gpf::VertexId{i}).property;
+            const auto [i1, i2] = v_props.parents;
+            auto [a1, b1] = v_props.vals[0];
+            auto [a2, b2] = v_props.vals[1];
+
+            auto a1b2 = std::abs(a1) * std::abs(b2);
+            auto a2b1 = std::abs(a2) * std::abs(b1);
+            auto t = a1b2 / (a1b2 + a2b1);
+            V.row(i) = V.row(i1.idx) * (1.0 - t) + V.row(i2.idx) * t;
+            info.points.emplace_back(std::array<double, 3>{{V(i, 0), V(i, 1), V(i, 2)}});
+        }
+    }
+    for (const auto face : mesh.faces()) {
+        if (ranges::all_of(face.data().property.materials, [](auto m) { return m >= 4;})) {
+            info.faces.emplace_back(face.halfedges() | views::transform([&point_indices](auto he) {
+                return point_indices[he.to().id.idx];
+            }) | ranges::to<std::vector>());
+        }
+    }
 }
 
 double MaterialInterface::compute_vert_orientations(const std::array<double, 4>& material, const gpf::VertexId vid) {
@@ -371,25 +466,34 @@ void do_material_interface(
         separators.emplace_back(v_high_materials.size());
     }
 
+    ExtractInfo info;
+    std::array<double, 12> corners;
     for (const auto &tet : tets) {
-        std::unordered_set<std::size_t> tet_materials;
+        std::unordered_set<std::size_t> tet_material_set;
         for (const auto vid : tet.vertices) {
             const auto idx = vid.idx;
-            tet_materials.insert(v_high_materials.begin() + separators[idx], v_high_materials.begin() + separators[idx + 1]);
+            tet_material_set.insert(v_high_materials.begin() + separators[idx], v_high_materials.begin() + separators[idx + 1]);
         }
-        if (tet_materials.size() < 2) {
+        if (tet_material_set.size() < 2) {
             continue;
         }
 
         const auto& tvs = tet.vertices;
+        for (std::size_t i = 0; i < 4; i++) {
+            auto p1 = &corners[i * 3];
+            const auto& p2 = tet_mesh.vertex_data(tvs[i]).property.pt;
+            p1[0] = p2[0];
+            p1[1] = p2[1];
+            p1[2] = p2[2];
+        }
 
         std::array<double, 4> min_material_values;
         for (auto [vid, v] : ranges::zip_view{tvs, min_material_values}) {
             auto& vals = tet_mesh.vertex(vid).data().property.distances;
-            v = ranges::min(tet_materials | views::transform([&vals, vid] (auto m) { return vals[m]; }));
+            v = ranges::min(tet_material_set | views::transform([&vals, vid] (auto m) { return vals[m]; }));
         }
         for (std::size_t m = 0; m < n_materials; m++) {
-            if (tet_materials.contains(m)) {
+            if (tet_material_set.contains(m)) {
                 continue;
             }
             auto count = ranges::count_if(ranges::zip_view{tvs, std::move(min_material_values)},  [&tet_mesh, m] (auto pair) {
@@ -398,19 +502,30 @@ void do_material_interface(
             });
 
             if (count > 1) {
-                tet_materials.insert(m);
+                tet_material_set.insert(m);
             }
         }
 
         auto mi = base_mi;
-        mi.materials.reserve(tet_materials.size());
-
-        for (const auto mid : tet_materials) {
+        mi.materials.reserve(tet_material_set.size());
+        auto tet_material_indices = tet_material_set | ranges::to<std::vector>();
+        auto materials = tet_material_indices | views::transform([&tvs, &tet_mesh](auto mid) {
             std::array<double, 4> material;
             for (auto [vid, v] : ranges::zip_view{tvs, material}) {
                 v = tet_mesh.vertex(vid).data().property.distances[mid];
             }
-            mi.add_material(std::move(material));
+            return material;
+        }) | ranges::to<std::vector>();
+        auto indices = ranges::iota_view{0ull, tet_material_indices.size()} | ranges::to<std::vector>();
+        ranges::sort(indices, [&materials] (auto i1, auto i2) {
+            return materials[i1] > materials[i2];
+        });
+
+        for (std::size_t i = 0; i < indices.size(); i++) {
+            mi.add_material(materials[indices[i]]);
         }
+        mi.extract(info, corners.data());
     }
+    write_mesh("output.obj", info.points, info.faces);
+    const auto a = 2;
 }

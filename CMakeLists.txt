@@ -28,7 +28,10 @@ CPMAddPackage(
 )
 
 CPMAddPackage("gh:BowenFu/matchit.cpp#main")
-CPMAddPackage("gh:qnzhou/implicit_predicates#main")
+CPMAddPackage(
+    NAME predicates
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../predicates
+)
 
 add_executable(multi-label-partition
     src/main.cpp
@@ -44,7 +47,7 @@ target_link_libraries(multi-label-partition PRIVATE
     igl::core
     igl_copyleft::tetgen
     matchit
-    implicit_predicates::implicit_predicates
+    predicates
 )
 target_include_directories(multi-label-partition PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include

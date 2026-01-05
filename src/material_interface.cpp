@@ -51,7 +51,7 @@ struct FaceProp {
 
 struct Cell {
     std::vector<std::size_t> faces;
-    std::size_t material;
+    std::size_t material{4ull};
 };
 
 using Mesh = gpf::SurfaceMesh<VertexProp, gpf::Empty, EdgeProp, FaceProp>;
@@ -165,22 +165,37 @@ void MaterialInterface::add_material(const std::array<double, 4>& material) {
     const auto a = 2;
 }
 void MaterialInterface::extract(ExtractInfo& info, const double* corners) noexcept {
+    std::vector<bool> keep_faces(mesh.n_faces_capacity(), false);
     std::vector<std::size_t> point_indices(mesh.n_vertices_capacity(), gpf::kInvalidIndex);
     auto cnt = info.points.size();
     for (const auto face : mesh.faces()) {
-        if (ranges::all_of(face.data().property.materials, [](auto m) { return m >= 4;})) {
-            for (const auto he : face.halfedges()) {
-                auto vid = he.to().id.idx;
-                if (point_indices[vid] == gpf::kInvalidIndex) {
-                    point_indices[he.to().id.idx] = cnt++;
+        auto face_props = face.data().property;
+        if (ranges::all_of(face_props.materials, [](auto m) { return m >= 4;})) {
+            const auto pid = face_props.pid;
+            if (pid >= 4 || ranges::all_of(face_props.materials, [this, pid](auto m) {
+                return ranges::any_of(ranges::iota_view{1, 4}, [this, m, pid](auto i) { return std::abs(materials[m - 4][(i + pid) % 4]) > 1e-8;});
+            })) {
+                keep_faces[face.id.idx] = true;
+                for (const auto he : face.halfedges()) {
+                    auto vid = he.to().id.idx;
+                    if (point_indices[vid] == gpf::kInvalidIndex) {
+                        point_indices[he.to().id.idx] = 0;
+                    }
                 }
             }
+
+        }
+    }
+    for(std::size_t i = 0; i < point_indices.size(); ++i) {
+        if (point_indices[i] != gpf::kInvalidIndex) {
+            point_indices[i] = cnt++;
         }
     }
 
     using Mat = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
     Mat V(point_indices.size(), 3);
     V.topRows(4) = Mat::ConstMapType(corners, 4, 3);
+
     for (std::size_t i = 4; i < point_indices.size(); ++i) {
         if (point_indices[i] != gpf::kInvalidIndex) {
             const auto& v_props = mesh.vertex_data(gpf::VertexId{i}).property;
@@ -192,11 +207,24 @@ void MaterialInterface::extract(ExtractInfo& info, const double* corners) noexce
             auto a2b1 = std::abs(a2) * std::abs(b1);
             auto t = a1b2 / (a1b2 + a2b1);
             V.row(i) = V.row(i1.idx) * (1.0 - t) + V.row(i2.idx) * t;
+
+            std::vector<double> vm(materials.size());
+            for (std::size_t i = 0; i < materials.size(); i++) {
+                vm[i] = materials[i][i1.idx] * (1.0 - t) + materials[i][i2.idx] * t;
+            }
+            if (std::abs(vm[0] - vm[1]) > 1e-6) {
+                const auto a = 2;
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < point_indices.size(); i++) {
+        if (point_indices[i] != gpf::kInvalidIndex) {
             info.points.emplace_back(std::array<double, 3>{{V(i, 0), V(i, 1), V(i, 2)}});
         }
     }
     for (const auto face : mesh.faces()) {
-        if (ranges::all_of(face.data().property.materials, [](auto m) { return m >= 4;})) {
+        if (keep_faces[face.id.idx]) {
             info.faces.emplace_back(face.halfedges() | views::transform([&point_indices](auto he) {
                 return point_indices[he.to().id.idx];
             }) | ranges::to<std::vector>());
@@ -432,7 +460,9 @@ void MaterialInterface::split_cells(const std::size_t mid) noexcept {
         }
 
         const auto new_fid = mesh.add_face_by_halfedges(new_halfedges, true);
-        mesh.face(new_fid).data().property.cells = {{n_old_cells, cid}};
+        auto& new_face_props = mesh.face(new_fid).data().property;
+        new_face_props.cells = {{n_old_cells, cid}};
+        new_face_props.materials = {{ cells[cid].material, mid }};
         pos_cell_faces.emplace_back(gpf::oriented_index(new_fid.idx, true));
         neg_cell_faces.emplace_back(gpf::oriented_index(new_fid.idx, false));
 

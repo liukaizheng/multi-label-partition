@@ -30,6 +30,7 @@
 #include <igl/readOBJ.h>
 #include <igl/copyleft/tetgen/tetrahedralize.h>
 #include <format>
+#include <iterator>
 #include <print>
 #include <ranges>
 #include <unordered_map>
@@ -147,6 +148,27 @@ auto read_colored_mesh(const std::string& file_name) {
     );
 }
 
+auto build_triangle_groups(
+    const std::vector<std::array<double, 3>>& points,
+    const std::vector<std::vector<std::size_t>>& faces,
+    const std::vector<std::vector<gpf::FaceId>>& label_face_groups
+) {
+    std::vector<std::vector<Triangle>> triangle_groups;
+    triangle_groups.reserve(label_face_groups.size());
+    for (const auto& label_faces : label_face_groups) {
+        std::vector<Triangle> triangles;
+        triangles.reserve(faces.size());
+        for (const auto fid : label_faces) {
+            auto pts = faces[fid.idx] | views::transform([&points] (auto vid) {
+                auto& p = points[vid];
+                return Point_3(p[0], p[1], p[2]);
+            }) | ranges::to<std::vector>();
+            triangles.emplace_back(std::move(pts[0]), std::move(pts[1]), std::move(pts[2]));
+        }
+        triangle_groups.emplace_back(std::move(triangles));
+    }
+    return triangle_groups;
+}
 
 auto build_tet_mesh(
     const VMat& TV,
@@ -226,26 +248,9 @@ auto build_tet_mesh(
     return std::make_pair(std::move(mesh), std::move(tets));
 }
 
-auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<gpf::FaceId>>& label_face_groups) {
-    std::vector<std::vector<Triangle>> triangle_groups;
-    triangle_groups.reserve(label_face_groups.size());
-    for (const auto& faces : label_face_groups) {
-        std::vector<Triangle> triangles;
-        triangles.reserve(faces.size());
-        for (const auto fid : faces) {
-            auto he = mesh.face(fid).halfedge();
-            auto points = mesh.face(fid).halfedges()
-                | views::transform([] (auto he) {
-                    auto& p = he.to().data().property.pt;
-                    return Point_3(p[0], p[1], p[2]); })
-                | ranges::to<std::vector>();
-            triangles.emplace_back(std::move(points[0]), std::move(points[1]), std::move(points[2]));
-        }
-        triangle_groups.emplace_back(std::move(triangles));
-    }
-
+auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<Triangle>>& triangle_groups) {
     std::vector<Tree> trees;
-    trees.reserve(label_face_groups.size());
+    trees.reserve(triangle_groups.size());
     for (const auto& triangles : triangle_groups) {
         trees.emplace_back(triangles.begin(), triangles.end());
         trees.back().accelerate_distance_queries();
@@ -256,7 +261,9 @@ auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<g
         dists.resize(trees.size());
         Point_3 pt(p[0], p[1], p[2]);
         for (auto [d, tree] : ranges::zip_view(dists, trees)) {
-            d = -std::sqrt(tree.squared_distance(pt));
+            // auto [closest_point, primitive] = tree.closest_point_and_primitive(pt);
+            // auto fid = primitive - triangle_groups[idx++].begin();
+            d = -tree.squared_distance(pt);
         }
     }
 }
@@ -269,6 +276,7 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::array<std::size_t, 3>> colors;
     auto [points, faces, label_face_groups] = read_colored_mesh(mesh_path);
+    auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
 
     VMat V(points.size(), 3);
     FMat F(faces.size(), 3);
@@ -285,9 +293,9 @@ int main(int argc, char* argv[]) {
     TMat TT;
     FMat TF;
 
-    igl::copyleft::tetgen::tetrahedralize(V, F, "pq1.414Y", TV, TT, TF);
+    igl::copyleft::tetgen::tetrahedralize(V, F, "pa0.004V", TV, TT, TF);
     auto [tet_mesh, tets] = build_tet_mesh(TV, TT, TF);
-    setup_neg_distance(tet_mesh, label_face_groups);
+    setup_neg_distance(tet_mesh, triangle_groups);
     do_material_interface(tets, tet_mesh);
     write_msh("123.obj", TV, TT);
     return 0;

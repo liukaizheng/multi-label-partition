@@ -32,6 +32,7 @@ CPMAddPackage(
     NAME predicates
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../predicates
 )
+CPMAddPackage("gh:qnzhou/MshIO#main")
 
 add_executable(multi-label-partition
     src/main.cpp
@@ -48,6 +49,7 @@ target_link_libraries(multi-label-partition PRIVATE
     igl_copyleft::tetgen
     matchit
     predicates
+    mshio::mshio
 )
 target_include_directories(multi-label-partition PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include

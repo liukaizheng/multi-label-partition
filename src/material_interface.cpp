@@ -228,6 +228,10 @@ void MaterialInterface::extract(ExtractInfo& info, const double* corners) noexce
             info.faces.emplace_back(face.halfedges() | views::transform([&point_indices](auto he) {
                 return point_indices[he.to().id.idx];
             }) | ranges::to<std::vector>());
+            auto& f = info.faces.back();
+            if (f[0] == 18494 && f[1] == 18495 && f[2] == 18493) {
+                const auto a = 2;
+            }
         }
     }
 }
@@ -475,6 +479,24 @@ void MaterialInterface::split_cells(const std::size_t mid) noexcept {
     cells.emplace_back(Cell{.faces{std::move(neg_cell_faces)}, .material = mid });
 }
 
+void save_tet(
+    const std::size_t tid,
+    const std::vector<tet_mesh::Tet> &tets,
+    const tet_mesh::TetMesh &tet_mesh
+) {
+    std::ofstream out("tet_" + std::to_string(tid) + ".obj");
+    const auto& tvs = tets[tid].vertices;
+    for (const auto vid : tvs) {
+        const auto& pt = tet_mesh.vertex(vid).data().property.pt;
+        out << "v " << pt[0] << " " << pt[1] << " " << pt[2] << "\n";
+    }
+    out << "f 1 2 3\n";
+    out << "f 1 4 2\n";
+    out << "f 2 4 3\n";
+    out << "f 3 4 1\n";
+    out.close();
+}
+
 void do_material_interface(
     const std::vector<tet_mesh::Tet> &tets,
     const tet_mesh::TetMesh &tet_mesh
@@ -498,7 +520,9 @@ void do_material_interface(
 
     ExtractInfo info;
     std::array<double, 12> corners;
+    std::size_t tid = 0;
     for (const auto &tet : tets) {
+        tid += 1;
         std::unordered_set<std::size_t> tet_material_set;
         for (const auto vid : tet.vertices) {
             const auto idx = vid.idx;

@@ -32,7 +32,6 @@
 #include <igl/readOBJ.h>
 #include <igl/copyleft/tetgen/tetrahedralize.h>
 #include <format>
-#include <iterator>
 #include <print>
 #include <ranges>
 #include <unordered_map>

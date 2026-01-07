@@ -17,6 +17,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include <fstream>
+#include <utility>
 auto write_mesh(const std::string& name, const std::vector<std::array<double, 3>>& uv, const std::vector<std::vector<std::size_t>>& F)
 {
     std::ofstream file(name);
@@ -37,7 +38,7 @@ namespace ranges = std::ranges;
 namespace views = std::views;
 
 struct VertexProp {
-    boost::container::small_vector<std::size_t, 4> materials;
+    std::array<std::size_t, 4> materials;
 
     std::array<gpf::VertexId, 2> parents;
     std::array<std::array<double, 2>, 2> vals;
@@ -45,11 +46,11 @@ struct VertexProp {
 };
 
 struct EdgeProp {
-    boost::container::small_vector<std::size_t, 3> materials;
+    std::array<std::size_t, 3> materials;
 };
 
 struct FaceProp {
-    boost::container::small_vector<std::size_t, 2> materials;
+    std::array<std::size_t, 2> materials;
     std::array<std::size_t, 2> cells{{0, gpf::kInvalidIndex}};
 };
 
@@ -128,7 +129,43 @@ private:
     void split_edges() noexcept;
     void split_faces() noexcept;
     void split_cells() noexcept;
+    void merge_negative_cell_faces() noexcept;
 };
+
+template<typename FaceRange>
+void merge_faces(Mesh& mesh, FaceRange&& face_range) noexcept {
+    std::unordered_map<gpf::EdgeId, gpf::HalfedgeId> edge_halfedge_map;
+    for (const gpf::FaceId fid : std::forward(face_range)) {
+        for (auto he : mesh.face(fid).halfedges()) {
+            auto it = edge_halfedge_map.emplace(he.edge().id, he.id);
+            if (!it.second) {
+                it.first->second = gpf::HalfedgeId{};
+            }
+        }
+    }
+    for (const auto [eid, hid] : edge_halfedge_map) {
+        if (hid.valid()) {
+            auto he = mesh.halfedge(hid);
+            he.from().data().halfedge = he.id;
+        }
+    }
+}
+
+void MaterialInterface::merge_negative_cell_faces() noexcept {
+    std::array<std::vector<std::size_t>, 4> boundary_faces;
+    std::unordered_map<gpf::FaceId, int> face_cancelling_map;
+    for (const auto ori_fid : cells.back().faces) {
+        const auto [fid_idx, reversed] = gpf::decode_index(ori_fid);
+        auto fid = gpf::FaceId{fid_idx};
+        const auto& f_props = mesh.face(fid).data().property;
+        const auto pid = f_props.materials[0];
+        if (pid < 4) {
+            boundary_faces[pid].emplace_back(ori_fid);
+        } else {
+            face_cancelling_map[fid] += reversed ? -1 : 1;
+        }
+    }
+}
 
 MaterialInterface::MaterialInterface() {
     mesh = Mesh::new_in(std::vector<std::vector<std::size_t>> {{2, 1, 3}, {0 ,2, 3}, {1, 0, 3}, {0, 1, 2}});
@@ -152,7 +189,6 @@ MaterialInterface::MaterialInterface() {
         auto& prop = f.data().property;
         prop.materials[0] = f.id.idx;
         prop.materials[1] = 4;
-        prop.pid = f.id.idx;
     }
 
     cells = { Cell{.faces{0, 2, 4, 6}} };
@@ -187,19 +223,18 @@ void MaterialInterface::add_material(const std::array<double, 4>& material) {
                     auto& f_prop = face.data().property;
                     assert(f_prop.materials[0] < 4);
                     f_prop.materials[0] = mid;
-                    const auto pid = f_prop.pid;
 
                     for (auto he : face.halfedges()) {
                         auto& v_mats = he.to().data().property.materials;
                         auto& e_mats = he.edge().data().property.materials;
-                        auto v_it = ranges::find_if(v_mats, [pid](std::size_t m) { return m == pid; });
-                        if (v_it != ranges::end(v_mats)) {
-                            *v_it = mid;
-                        }
-                        auto e_it = ranges::find_if(e_mats, [pid](std::size_t m) { return m == pid; });
-                        if (e_it != ranges::end(e_mats)) {
-                            *e_it = mid;
-                        }
+                        // auto v_it = ranges::find_if(v_mats, [pid](std::size_t m) { return m == pid; });
+                        // if (v_it != ranges::end(v_mats)) {
+                            // *v_it = mid;
+                        // }
+                        // auto e_it = ranges::find_if(e_mats, [pid](std::size_t m) { return m == pid; });
+                        // if (e_it != ranges::end(e_mats)) {
+                            // *e_it = mid;
+                        // }
                     }
 
                     // Because the sorting is done before adding materials,
@@ -226,7 +261,7 @@ void MaterialInterface::extract(
     for (const auto face : mesh.faces()) {
         auto face_props = face.data().property;
         if (ranges::all_of(face_props.materials, [](auto m) { return m >= 4;})) {
-            const auto pid = face_props.pid;
+            const auto pid = face_props.materials[0];
             if (pid >= 4 || ranges::all_of(face_props.materials, [this, pid](auto m) {
                 return ranges::any_of(ranges::iota_view{1, 4}, [this, m, pid](auto i) { return std::abs(materials[m - 4][(i + pid) % 4]) > 1e-8;});
             })) {
@@ -252,7 +287,7 @@ void MaterialInterface::extract(
         }
     }
 
-    using Mat = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
+    /*using Mat = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
     Mat V(point_indices.size(), 3);
     V.topRows(4) = Mat::ConstMapType(corners, 4, 3);
 
@@ -293,7 +328,7 @@ void MaterialInterface::extract(
                 const auto a = 2;
             }
         }
-    }
+        }*/
 }
 
 double MaterialInterface::compute_vert_orientations(const gpf::VertexId vid) {
@@ -373,9 +408,9 @@ double MaterialInterface::compute_vert_orientations(const gpf::VertexId vid) {
     } else if (shape[0] == 4) {
         v_props.ori = compute_sign_3();
     }
-    if (v_props.ori[0] == 0) {
-        v_props.materials.emplace_back(this->materials.size() + 3);
-    }
+    // if (v_props.ori[0] == 0) {
+        // v_props.materials.emplace_back(this->materials.size() + 3);
+    // }
     return v_props.ori[0];
 }
 

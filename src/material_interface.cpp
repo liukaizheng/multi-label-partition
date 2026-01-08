@@ -5,6 +5,7 @@
 #include "gpf/utils.hpp"
 #include "tet_mesh.hpp"
 
+#include <iterator>
 #include <predicates/predicates.hpp>
 
 #include <Eigen/Dense>
@@ -47,6 +48,7 @@ struct VertexProp {
 
 struct EdgeProp {
     std::array<std::size_t, 3> materials;
+    gpf::EdgeId parent;
 };
 
 struct FaceProp {
@@ -132,23 +134,116 @@ private:
     void merge_negative_cell_faces() noexcept;
 };
 
+void merge_collinear_edges_on_face(Mesh& mesh, const gpf::FaceId fid) noexcept {
+    auto face = mesh.face(fid);
+    auto face_halfedges = face.halfedges();
+    auto fh = *std::ranges::find_if(face_halfedges, [](const auto h) {
+        auto prev = h.prev();
+        return prev.edge().data().property.parent != h.edge().data().property.parent;
+    });
+
+    auto start_vid = fh.from().id;
+    gpf::EdgeId parent;
+    std::vector<gpf::HalfedgeId> halfedges;
+    do {
+        if (halfedges.empty()) {
+            parent = fh.edge().id;
+            halfedges.emplace_back(fh.id);
+        } else {
+            if (fh.edge().id == parent) {
+                halfedges.emplace_back(fh.id);
+            } else {
+                assert(!halfedges.empty());
+                if (halfedges.size() > 1) {
+                    #ifndef NDEBUG
+                        for (const auto hid : halfedges) {
+                            auto h = mesh.halfedge(hid);
+                            assert(!h.edge().halfedge().id.valid() || ranges::distance(h.edge().halfedges()) == 2);
+                        }
+                    #endif
+                    auto ha = mesh.halfedge(halfedges.front());
+                    auto hb = mesh.halfedge(halfedges.back());
+                    auto ha_prev = ha.prev();
+                    auto va = ha_prev.to();
+                    auto vb = hb.to();
+                    auto ha_twin = ha.sibling();
+                    assert(ha_twin.to().id == va.id);
+                    // connect halfedges
+                    ha_prev.data().next = hb.id;
+                    hb.data().prev = ha_prev.id;
+                    // set vertex halfedge
+                    // [NOTICE]: there is no need to set vertex sibling, because they didn't be modified.
+                    // There is alse no need to delete unsed verttices, bcause we will delete them when delete unused faces
+                    va.data().halfedge = hb.id;
+                    if (ha.edge().id == hb.edge().id) {
+                        // have corrected
+                        assert(ranges::distance(ha.edge().halfedges()) == 2);
+                    } else {
+                        for (std::size_t i = 0; i + 1 < halfedges.size(); i++) {
+                            mesh.halfedge(halfedges[i]).edge().data().halfedge = gpf::HalfedgeId{};
+                        }
+                        ha.data().edge = hb.edge().id;
+                    }
+                    // delete unused halfedges
+                    for (std::size_t i = 1; i + 1 < halfedges.size(); i++) {
+                        mesh.halfedge(halfedges[i]).data().vertex = gpf::VertexId{};
+                    }
+                }
+                halfedges.clear();
+                halfedges.emplace_back(fh.id);
+            }
+        }
+        auto next = fh.next();
+    } while(fh.from().id != start_vid);
+}
+
 template<typename FaceRange>
-void merge_faces(Mesh& mesh, FaceRange&& face_range) noexcept {
+auto merge_faces(Mesh& mesh, FaceRange&& face_range) noexcept {
     std::unordered_map<gpf::EdgeId, gpf::HalfedgeId> edge_halfedge_map;
-    for (const gpf::FaceId fid : std::forward(face_range)) {
-        for (auto he : mesh.face(fid).halfedges()) {
+    gpf::FaceId first_fid;
+    for (const gpf::FaceId fid : std::forward<FaceRange>(face_range)) {
+        auto face = mesh.face(fid);
+        for (auto he : face.halfedges()) {
             auto it = edge_halfedge_map.emplace(he.edge().id, he.id);
             if (!it.second) {
                 it.first->second = gpf::HalfedgeId{};
             }
         }
+        if (!first_fid.valid()) {
+            first_fid = fid;
+        } else {
+            face.data().halfedge = gpf::HalfedgeId{};
+        }
     }
+
+    gpf::HalfedgeId face_first_hid{};
     for (const auto [eid, hid] : edge_halfedge_map) {
         if (hid.valid()) {
             auto he = mesh.halfedge(hid);
             he.from().data().halfedge = he.id;
+            if (!face_first_hid.valid()) {
+                face_first_hid = hid;
+            }
         }
+        // Don't delete unused halfedges, `he.from()` maybe need them
+        // We will delete them when deleting unused faces
     }
+
+    gpf::HalfedgeId prev_hid{};
+    mesh.face(first_fid).data().halfedge = face_first_hid;
+    gpf::HalfedgeId curr_hid = face_first_hid;
+    do {
+        mesh.halfedge(curr_hid).data().face = first_fid;
+        if (prev_hid.valid()) {
+            mesh.connect_halfedges(prev_hid, curr_hid);
+        }
+        prev_hid = curr_hid;
+        curr_hid = mesh.halfedge(curr_hid).to().halfedge().id;
+    } while (curr_hid != face_first_hid);
+    mesh.connect_halfedges(prev_hid, face_first_hid);
+
+    merge_collinear_edges_on_face(mesh, first_fid);
+    return first_fid;
 }
 
 void MaterialInterface::merge_negative_cell_faces() noexcept {
@@ -165,6 +260,34 @@ void MaterialInterface::merge_negative_cell_faces() noexcept {
             face_cancelling_map[fid] += reversed ? -1 : 1;
         }
     }
+
+    std::vector<std::size_t> new_cell_faces;
+    new_cell_faces.reserve(cells.back().faces.size());
+    for (const auto& ori_faces : boundary_faces) {
+        if (ori_faces.size() == 1) {
+            new_cell_faces.emplace_back(ori_faces[0]);
+        } else if (ori_faces.size() > 1) {
+            const auto fid = merge_faces(mesh, ori_faces | views::transform([](auto ori_fid) { return gpf::FaceId{gpf::strip_orientation(ori_fid)}; }));
+            new_cell_faces.emplace_back(gpf::oriented_index(fid.idx, gpf::is_negative(cells.back().faces[0])));
+        }
+    }
+
+    for (const auto [fid, cnt] : face_cancelling_map) {
+        if (cnt != 0) {
+            new_cell_faces.emplace_back(gpf::oriented_index(fid.idx, cnt < 0));
+            continue;
+        }
+        auto face = mesh.face(fid);
+        for (const auto he : face.halfedges()) {
+            auto edge = he.edge();
+            for (const auto h : edge.halfedges()) {
+                h.data().vertex = gpf::VertexId{};
+            }
+            edge.data().halfedge = gpf::HalfedgeId{};
+        }
+        face.data().halfedge = gpf::HalfedgeId{};
+    }
+    cells.back().faces.swap(new_cell_faces);
 }
 
 MaterialInterface::MaterialInterface() {
@@ -572,7 +695,6 @@ void MaterialInterface::split_cells() noexcept {
         new_face_props.materials = {{ cells[cid].material, mid }};
         pos_cell_faces.emplace_back(gpf::oriented_index(new_fid.idx, true));
         neg_cell_faces.emplace_back(gpf::oriented_index(new_fid.idx, false));
-
 
         assert(neg_cell_faces.size() >= 4);
         assert(pos_cell_faces.size() >= 4);

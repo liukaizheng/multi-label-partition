@@ -130,7 +130,7 @@ private:
     double compute_vert_orientations(const gpf::VertexId vid);
     void split_edges() noexcept;
     void split_faces() noexcept;
-    void split_cells() noexcept;
+    void split_cells(const std::size_t max_v_idx) noexcept;
     void merge_negative_cell_faces() noexcept;
 };
 
@@ -173,7 +173,7 @@ void merge_collinear_edges_on_face(Mesh& mesh, const gpf::FaceId fid) noexcept {
                     hb.data().prev = ha_prev.id;
                     // set vertex halfedge
                     // [NOTICE]: there is no need to set vertex sibling, because they didn't be modified.
-                    // There is alse no need to delete unsed verttices, bcause we will delete them when delete unused faces
+                    // There is also no need to delete unused verttices, because we will delete them when delete unused faces
                     va.data().halfedge = hb.id;
                     if (ha.edge().id == hb.edge().id) {
                         // have corrected
@@ -318,7 +318,6 @@ MaterialInterface::MaterialInterface() {
 }
 
 void MaterialInterface::add_material(const std::array<double, 4>& material) {
-    auto mid = materials.size();
     materials.emplace_back(material);
     if (materials.size() == 1) {
         return;
@@ -338,41 +337,15 @@ void MaterialInterface::add_material(const std::array<double, 4>& material) {
         }
     }
 
-    mid += 4;
-    if (n_neg == 0 || n_pos == 0) {
-        if (n_zero >= 3) {
-            for (auto face : mesh.faces()) {
-                if (ranges::all_of(face.halfedges(), [] (auto he) { return he.to().data().property.ori[0] == 0.0;}) ) {
-                    auto& f_prop = face.data().property;
-                    assert(f_prop.materials[0] < 4);
-                    f_prop.materials[0] = mid;
-
-                    for (auto he : face.halfedges()) {
-                        auto& v_mats = he.to().data().property.materials;
-                        auto& e_mats = he.edge().data().property.materials;
-                        // auto v_it = ranges::find_if(v_mats, [pid](std::size_t m) { return m == pid; });
-                        // if (v_it != ranges::end(v_mats)) {
-                            // *v_it = mid;
-                        // }
-                        // auto e_it = ranges::find_if(e_mats, [pid](std::size_t m) { return m == pid; });
-                        // if (e_it != ranges::end(e_mats)) {
-                            // *e_it = mid;
-                        // }
-                    }
-
-                    // Because the sorting is done before adding materials,
-                    // the latest material cannot be overwhelming of the previous ones.
-                    // So there is no cell generated for the latest material
-                }
-            }
-        }
+    if (n_neg == 0) {
         return;
     }
 
+    const auto max_v_idx = mesh.n_vertices_capacity();
 
     split_edges();
     split_faces();
-    split_cells();
+    split_cells(max_v_idx);
 }
 void MaterialInterface::extract(
     ExtractInfo& info,
@@ -621,7 +594,7 @@ void MaterialInterface::split_faces() noexcept {
     }
 }
 
-void MaterialInterface::split_cells() noexcept {
+void MaterialInterface::split_cells(const std::size_t max_v_idx) noexcept {
     const auto mid = this->materials.size() + 3;
     const auto n_old_cells = cells.size();
     std::vector<std::size_t> neg_cell_faces;
@@ -688,18 +661,34 @@ void MaterialInterface::split_cells() noexcept {
                 break;
             }
         }
+        if (ranges::all_of(new_halfedges, [this, max_v_idx](const auto hid) { return mesh.halfedge(hid).to().id.idx < max_v_idx;})) {
+            auto va = mesh.halfedge(new_halfedges.back()).to().id;
+            auto vb = mesh.halfedge(new_halfedges.front()).to().id;
+            auto vc = mesh.halfedge(new_halfedges[1]).to().id;
 
-        const auto new_fid = mesh.add_face_by_halfedges(new_halfedges, true);
-        auto& new_face_props = mesh.face(new_fid).data().property;
-        new_face_props.cells = {{n_old_cells, cid}};
-        new_face_props.materials = {{ cells[cid].material, mid }};
-        pos_cell_faces.emplace_back(gpf::oriented_index(new_fid.idx, true));
-        neg_cell_faces.emplace_back(gpf::oriented_index(new_fid.idx, false));
 
-        assert(neg_cell_faces.size() >= 4);
-        assert(pos_cell_faces.size() >= 4);
+            // because there is no more than two collinear vertices,
+            // three vertices can determine a face
+            std::size_t ori_fid = gpf::kInvalidIndex;
+            for (const auto he : hb.edge().halfedges()) {
+                if (he.to().id == vb) {
+                    if (he.next().id == )
+                }
+            }
+        } else {
+            const auto new_fid = mesh.add_face_by_halfedges(new_halfedges, true);
+            auto& new_face_props = mesh.face(new_fid).data().property;
+            new_face_props.cells = {{n_old_cells, cid}};
+            new_face_props.materials = {{ cells[cid].material, mid }};
+            pos_cell_faces.emplace_back(gpf::oriented_index(new_fid.idx, true));
+            neg_cell_faces.emplace_back(gpf::oriented_index(new_fid.idx, false));
 
-        cells[cid].faces.swap(pos_cell_faces);
+            assert(neg_cell_faces.size() >= 4);
+            assert(pos_cell_faces.size() >= 4);
+
+            cells[cid].faces.swap(pos_cell_faces);
+        }
+
     }
     cells.emplace_back(Cell{.faces{std::move(neg_cell_faces)}, .material = mid });
 }

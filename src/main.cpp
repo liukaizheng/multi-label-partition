@@ -73,17 +73,18 @@ using RowSpMat = Eigen::SparseMatrix<double, Eigen::RowMajor>;
 namespace ranges = std::ranges;
 namespace views = std::views;
 
-void write_msh(const std::string& name, const VMat& V, const TMat& T) {
+void write_msh(const std::string& name, const tet_mesh::TetMesh& mesh) {
     std::ofstream out(name);
-    for (Eigen::Index i = 0; i < V.rows(); ++i) {
-        std::println(out, "v {} {} {}", V(i, 0), V(i, 1), V(i, 2));
+    for (const auto v : mesh.vertices()) {
+        const auto& pt = v.data().property.pt;
+        std::println(out, "v {} {} {}", pt[0], pt[1], pt[2]);
     }
-    for (Eigen::Index i = 0; i < T.rows(); ++i) {
-        const auto t = T.row(i);
-        std::println(out, "f {} {} {}", t(0) + 1, t(1) + 1, t(2) + 1);
-        std::println(out, "f {} {} {}", t(0) + 1, t(2) + 1, t(3) + 1);
-        std::println(out, "f {} {} {}", t(0) + 1, t(3) + 1, t(1) + 1);
-        std::println(out, "f {} {} {}", t(1) + 1, t(3) + 1, t(2) + 1);
+    for (const auto f : mesh.faces()) {
+        std::print(out, "f");
+        for (const auto he : f.halfedges()) {
+            std::print(out, " {}", he.to().id.idx + 1);
+        }
+        std::println(out);
     }
 }
 
@@ -401,6 +402,7 @@ int main(int argc, char* argv[]) {
     // auto [tet_mesh, tets] = build_tet_mesh(TV, TT, TF);
 
     auto [tet_mesh, tets] = build_tet_mesh1(tet_points, tet_indices);
+    write_msh("123.obj", tet_mesh);
     setup_neg_distance(tet_mesh, triangle_groups);
     do_material_interface(tets, tet_mesh);
     return 0;

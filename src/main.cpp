@@ -402,7 +402,7 @@ int main(int argc, char* argv[]) {
     // auto [tet_mesh, tets] = build_tet_mesh(TV, TT, TF);
 
     auto [tet_mesh, tets] = build_tet_mesh1(tet_points, tet_indices);
-    write_msh("123.obj", tet_mesh);
+    // write_msh("123.obj", tet_mesh);
     setup_neg_distance(tet_mesh, triangle_groups);
     do_material_interface(tets, tet_mesh);
     return 0;

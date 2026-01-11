@@ -15,6 +15,7 @@
 #include <CGAL/boost/graph/Euler_operations.h>
 #include <CGAL/boost/graph/helpers.h>
 
+#include <algorithm>
 #include <array>
 #include <boost/functional/hash.hpp>
 
@@ -402,6 +403,13 @@ int main(int argc, char* argv[]) {
     // auto [tet_mesh, tets] = build_tet_mesh(TV, TT, TF);
 
     auto [tet_mesh, tets] = build_tet_mesh1(tet_points, tet_indices);
+    auto it = ranges::find_if(tets, [](const auto& tet) {
+        const auto& tvs = tet.vertices;
+        return tvs[0].idx == 32557 && tvs[1].idx == 133 && tvs[2].idx == 61054 && tvs[3].idx == 53075;
+    });
+    std::iter_swap(tets.begin(), it);
+
+
     // write_msh("123.obj", tet_mesh);
     setup_neg_distance(tet_mesh, triangle_groups);
     do_material_interface(tets, tet_mesh);

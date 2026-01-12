@@ -6,7 +6,9 @@
 #include "gpf/utils.hpp"
 #include "tet_mesh.hpp"
 
+#include <bit>
 #include <iterator>
+#include <numeric>
 #include <predicates/predicates.hpp>
 
 #include <Eigen/Dense>
@@ -133,7 +135,7 @@ private:
     void split_edges() noexcept;
     void split_faces() noexcept;
     void split_cells(const std::size_t max_v_idx) noexcept;
-    void set_negative_face_properties(const gpf::FaceId fid, const std::size_t flag, const std::size_t new_cid, const std::size_t old_mid, const std::size_t new_mid) noexcept;
+    void set_negative_face_properties(const gpf::FaceId fid, const std::size_t flag, const std::size_t new_cid, const std::size_t new_mid) noexcept;
     void merge_negative_cell_faces() noexcept;
 };
 
@@ -332,6 +334,13 @@ void MaterialInterface::merge_negative_cell_faces() noexcept {
         mesh.halfedge(hb).data().sibling = ha;
     }
 
+    const auto check_vertex_is_deleted = [this](gpf::VertexId vid) {
+        return ranges::all_of(mesh.vertex(vid).incoming_halfedges(), [this, vid](const auto& he) {
+            auto v = he.to().id;
+            return !v.valid() || v != vid;
+        });
+    };
+
     for (const auto [fid, cnt] : face_cancelling_map) {
         if (cnt != 0) {
             new_cell_faces.emplace_back(gpf::oriented_index(fid.idx, cnt < 0));
@@ -363,7 +372,7 @@ void MaterialInterface::merge_negative_cell_faces() noexcept {
                 edge.data().halfedge = delete_sibling(mesh, he.id);
             }
 
-            if (prev_edge_deleted && delete_edge) {
+            if (prev_edge_deleted && delete_edge && check_vertex_is_deleted(prev_vid)){
                 mesh.delete_vertex(prev_vid);
             } else if (prev_vid.valid()) {
                 delete_incoming_next(mesh, prev_hid);
@@ -373,8 +382,7 @@ void MaterialInterface::merge_negative_cell_faces() noexcept {
             prev_hid = he.id;
             prev_edge_deleted = delete_edge;
         }
-        if (prev_edge_deleted && first_edge_deleted) {
-            assert(prev_vid.valid());
+        if (prev_edge_deleted && first_edge_deleted && check_vertex_is_deleted(prev_vid)) {
             mesh.delete_vertex(prev_vid);
         } else {
             delete_incoming_next(mesh, prev_hid);
@@ -479,9 +487,6 @@ void MaterialInterface::add_material(const std::array<double, 4>& material) {
         } else {
             n_zero++;
         }
-    }
-    if (n_zero >= 3) {
-        const auto a = 2;
     }
 
     if (n_zero < 3 && n_neg == 0) {
@@ -812,41 +817,18 @@ void MaterialInterface::set_negative_face_properties(
     const gpf::FaceId fid,
     const std::size_t flag,
     const std::size_t new_cid,
-    const std::size_t old_mid,
     const std::size_t new_mid
 ) noexcept {
     auto face = mesh.face(fid);
     auto& f_props = face.data().property;
     f_props.cells[flag] = new_cid;
+    f_props.materials[1] = new_mid;
 
     auto& mat = f_props.materials;
-    if (mat[0] == old_mid) {
-        mat[0] = new_mid;
-    } else {
-        assert(mat[1] == old_mid);
-        mat[1] = new_mid;
-    }
 
-    bool first = true;
     for (auto he : face.halfedges()) {
-        if (first) {
-            first = false;
-            if (he.from().data().property.ori[0] == 0.0 && he.to().data().property.ori[0] == 0.0) {
-                continue;
-            }
-        }
-
-        assert(ranges::any_of(he.edge().data().property.materials, [old_mid, new_mid] (const auto mid) {
-            return mid == old_mid || mid == new_mid;
-        }));
-        for (auto& mid : he.edge().data().property.materials) {
-            if (mid == old_mid) {
-                mid = new_mid;
-                break;
-            } else if (mid == new_mid) {
-                break;
-            }
-        }
+        he.to().data().property.materials[3] = new_mid;
+        he.edge().data().property.materials[2] = new_mid;
     }
 }
 
@@ -884,7 +866,7 @@ void MaterialInterface::split_cells(const std::size_t max_v_idx) noexcept {
                         pos_cell_faces.emplace_back(ori_fid);
                     } else {
                         neg_cell_faces.emplace_back(ori_fid);
-                        set_negative_face_properties(fid, ori_fid & 1, n_old_cells, cells[cid].material, mid);
+                        set_negative_face_properties(fid, ori_fid & 1, n_old_cells, mid);
                         auto [v, h] = gpf::is_positive(ori_fid) ? std::pair(vb, he.twin()) : std::pair{va, he};
                         face.data().property.cells[ori_fid & 1] = n_old_cells;
                         v.data().halfedge = h.id;
@@ -905,7 +887,7 @@ void MaterialInterface::split_cells(const std::size_t max_v_idx) noexcept {
                     pos_cell_faces.push_back(ori_fid);
                 } else {
                     neg_cell_faces.push_back(ori_fid);
-                    set_negative_face_properties(fid, ori_fid & 1, n_old_cells, cells[cid].material, mid);
+                    set_negative_face_properties(fid, ori_fid & 1, n_old_cells, mid);
                 }
             }
         }
@@ -938,6 +920,7 @@ void MaterialInterface::split_cells(const std::size_t max_v_idx) noexcept {
                 f_props.has_boundary = true;
                 cells[cid].faces.clear();
                 neg_cell_faces.emplace_back(coplanar_ori_fid);
+                f_props.materials[1] = mid;
             } else {
                 mesh.face(new_fid).data().property.has_boundary = true;
             }
@@ -957,7 +940,7 @@ void MaterialInterface::split_cells(const std::size_t max_v_idx) noexcept {
 
     }
     if (!new_fid.valid()) {
-        assert(neg_cell_faces.size() == mesh.n_faces());
+        assert(neg_cell_faces.size() == std::transform_reduce(cells.begin(), cells.end(), std::size_t{0}, std::plus{}, [](const auto& cell) { return cell.faces.size(); }));
         for (auto& cell : cells) {
             cell.faces.clear();
         }
@@ -1045,7 +1028,7 @@ void do_material_interface(
                 tet_material_set.insert(m);
             }
         }
-        if (tvs[0].idx == 32557 && tvs[1].idx == 133 && tvs[2].idx == 61054 && tvs[3].idx == 53075) {
+        if (tvs[0].idx == 48768 && tvs[1].idx == 673 && tvs[2].idx == 41618 && tvs[3].idx == 30252) {
             const auto a = 2;
         }
 
@@ -1061,9 +1044,17 @@ void do_material_interface(
             return material;
         }) | ranges::to<std::vector>();
 
+        std::vector<std::array<std::size_t, 4>> material_int_values(materials.size());
+        for (std::size_t i = 0; i < materials.size(); ++i) {
+            for (std::size_t j = 0; j < 4; ++j) {
+                material_int_values[i][j] = std::bit_cast<std::size_t>(materials[i][j]);
+            }
+        }
+
         for (const auto& m : materials) {
             mi.add_material(m);
         }
+
         mi.extract(info, tet_mesh, tet, tet_material_indices);
     }
     write_mesh("output.obj", info.points, info.faces);

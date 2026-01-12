@@ -405,7 +405,7 @@ int main(int argc, char* argv[]) {
     auto [tet_mesh, tets] = build_tet_mesh1(tet_points, tet_indices);
     auto it = ranges::find_if(tets, [](const auto& tet) {
         const auto& tvs = tet.vertices;
-        return tvs[0].idx == 32557 && tvs[1].idx == 133 && tvs[2].idx == 61054 && tvs[3].idx == 53075;
+        return tvs[0].idx == 48768 && tvs[1].idx == 673 && tvs[2].idx == 41618 && tvs[3].idx == 30252;
     });
     std::iter_swap(tets.begin(), it);
 

@@ -557,12 +557,13 @@ void MaterialInterface::extract(
                 if (point_indices[vid] == info.points.size()) {
                     info.points.emplace_back(std::array<double, 3>{{V(vid, 0), V(vid, 1), V(vid, 2)}});
                 }
-                #ifndef NDEBUG
-                for (std::size_t i = 0; i < materials.size(); ++i) {
-                    VM(vid, i) = materials[i][vid];
-                }
-                #endif
+
             }
+            #ifndef NDEBUG
+            for (std::size_t i = 0; i < materials.size(); ++i) {
+                VM(vid, i) = materials[i][vid];
+            }
+            #endif
         } else if (point_indices[vid] != gpf::kInvalidIndex) {
             const auto& vm = mesh.vertex(gpf::VertexId{vid}).data().property.materials; // vertex materials
             const auto count = ranges::distance(ranges::begin(vm), ranges::find_if(vm, [](const auto m) {return m >= 4; }));
@@ -624,6 +625,19 @@ void MaterialInterface::extract(
                 }
                 #endif
             }
+        } else {
+            const auto& v_props = mesh.vertex_data(gpf::VertexId{vid}).property;
+            const auto [i1, i2] = v_props.parents;
+            auto [a1, b1] = v_props.vals[0];
+            auto [a2, b2] = v_props.vals[1];
+
+            auto a1b2 = std::abs(a1) * std::abs(b2);
+            auto a2b1 = std::abs(a2) * std::abs(b1);
+            auto t = a1b2 / (a1b2 + a2b1);
+            V.row(vid) = V.row(i1.idx) * (1.0 - t) + V.row(i2.idx) * t;
+            #ifndef NDEBUG
+            VM.row(vid) = VM.row(i1.idx) * (1.0 - t) + VM.row(i2.idx) * t;
+            #endif
         }
     }
 
@@ -1028,7 +1042,7 @@ void do_material_interface(
                 tet_material_set.insert(m);
             }
         }
-        if (tvs[0].idx == 48768 && tvs[1].idx == 673 && tvs[2].idx == 41618 && tvs[3].idx == 30252) {
+        if (tvs[0].idx == 33557 && tvs[1].idx == 42399 && tvs[2].idx == 42401 && tvs[3].idx == 16516) {
             const auto a = 2;
         }
 

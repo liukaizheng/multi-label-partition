@@ -326,7 +326,7 @@ void MaterialInterface::merge_negative_cell_faces() noexcept {
             mesh.reassign_face_vertex_halfedge(gpf::FaceId{gpf::strip_orientation(ori_faces[0])});
         } else if (ori_faces.size() > 1) {
             const auto fid = merge_faces(mesh, merge_halfedges_map, ori_faces | views::transform([](auto ori_fid) { return gpf::FaceId{gpf::strip_orientation(ori_fid)}; }));
-            new_cell_faces.emplace_back(gpf::oriented_index(fid.idx, gpf::is_negative(cells.back().faces[0])));
+            new_cell_faces.emplace_back(gpf::oriented_index(fid.idx, gpf::is_negative(ori_faces[0])));
         }
     }
 
@@ -643,21 +643,17 @@ void MaterialInterface::extract(
 
     for (const auto fid : kept_faces) {
         const auto face = mesh.face(fid);
-        const auto& f_materials = face.data().property.materials;
+        const auto& f_props = face.data().property;
+        const auto& f_materials = f_props.materials;
         if (f_materials[0] < 4) {
-                info.faces.emplace_back(face.halfedges() | views::transform([&point_indices](auto he) {
-                    return point_indices[he.to().id.idx];
-                }) | ranges::to<std::vector>());
+            info.faces.emplace_back(face.halfedges() | views::transform([&point_indices](auto he) {
+                return point_indices[he.to().id.idx];
+            }) | ranges::to<std::vector>());
         } else {
-            if (f_materials[0] < f_materials[1]) {
-                info.faces.emplace_back(face.halfedges() | views::transform([&point_indices](auto he) {
-                    return point_indices[he.to().id.idx];
-                }) | ranges::to<std::vector>());
-            } else {
-                info.faces.emplace_back(face.halfedges_reverse() | views::transform([&point_indices](auto he) {
-                    return point_indices[he.to().id.idx];
-                }) | ranges::to<std::vector>());
-            }
+            assert(cells[f_props.cells[0]].material > cells[f_props.cells[1]].material);
+            info.faces.emplace_back(face.halfedges_reverse() | views::transform([&point_indices](auto he) {
+                return point_indices[he.to().id.idx];
+            }) | ranges::to<std::vector>());
         }
     }
 }

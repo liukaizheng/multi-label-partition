@@ -229,7 +229,7 @@ auto build_tet_mesh1(
     std::vector<tet_mesh::Tet> tets;
     for (std::size_t i = 0; i < tet_indices.size(); ++i) {
         const auto& t = tet_indices[i];
-        std::array<std::size_t, 4> tet_faces;
+        std::array<gpf::FaceId, 4> tet_faces;
         std::size_t idx = 0;
         for (auto&& face : {
             std::array<std::size_t, 3>{{t[2], t[1], t[3]}},
@@ -238,13 +238,12 @@ auto build_tet_mesh1(
             std::array<std::size_t, 3>{{t[0], t[1], t[2]}}
         }) {
             auto iter = face_index_map.emplace(hash_key(face), faces.size());
+            tet_faces[idx] = gpf::FaceId{iter.first->second};
             if (iter.second) {
                 faces.emplace_back(std::move(face));
                 face_tets.emplace_back(std::array<std::size_t, 2>{{i, gpf::kInvalidIndex}});
-                tet_faces[idx] = gpf::oriented_index(iter.first->second, false);
             } else {
                 face_tets[iter.first->second][1] = i;
-                tet_faces[idx] = gpf::oriented_index(iter.first->second, true);
             }
             idx += 1;
         }
@@ -298,7 +297,7 @@ auto build_tet_mesh(
     std::vector<tet_mesh::Tet> tets;
     for (std::size_t i = 0; i < TT.rows(); ++i) {
         auto t = TT.row(i);
-        std::array<std::size_t, 4> tet_faces;
+        std::array<gpf::FaceId, 4> tet_faces;
         std::size_t idx = 0;
         for (auto&& face : {
             std::array<std::size_t, 3>{{t[2], t[1], t[3]}},
@@ -307,17 +306,15 @@ auto build_tet_mesh(
             std::array<std::size_t, 3>{{t[0], t[1], t[2]}}
         }) {
             auto iter = face_index_map.emplace(hash_key(face), faces.size());
+            tet_faces[idx] = gpf::FaceId{iter.first->second};
             if (iter.second) {
                 faces.emplace_back(std::move(face));
                 face_tets.emplace_back(std::array<std::size_t, 2>{{i, gpf::kInvalidIndex}});
-                tet_faces[idx] = gpf::oriented_index(iter.first->second, false);
             } else {
                 if (face_tets[iter.first->second][0] == gpf::kInvalidIndex) {
                     face_tets[iter.first->second][0] = i;
-                    tet_faces[idx] = gpf::oriented_index(iter.first->second, false);
                 } else {
                     face_tets[iter.first->second][1] = i;
-                    tet_faces[idx] = gpf::oriented_index(iter.first->second, true);
                 }
             }
             idx += 1;

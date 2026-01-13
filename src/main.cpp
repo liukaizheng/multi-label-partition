@@ -400,11 +400,11 @@ int main(int argc, char* argv[]) {
     // auto [tet_mesh, tets] = build_tet_mesh(TV, TT, TF);
 
     auto [tet_mesh, tets] = build_tet_mesh1(tet_points, tet_indices);
-    auto it = ranges::find_if(tets, [](const auto& tet) {
-        const auto& tvs = tet.vertices;
-        return tvs[0].idx == 33557 && tvs[1].idx == 42399 && tvs[2].idx == 42401 && tvs[3].idx == 16516;
-    });
-    std::iter_swap(tets.begin(), it);
+    // auto it = ranges::find_if(tets, [](const auto& tet) {
+        // const auto& tvs = tet.vertices;
+        // return tvs[0].idx == 33557 && tvs[1].idx == 42399 && tvs[2].idx == 42401 && tvs[3].idx == 16516;
+    // });
+    // std::iter_swap(tets.begin(), it);
 
 
     // write_msh("123.obj", tet_mesh);

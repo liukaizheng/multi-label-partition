@@ -101,6 +101,7 @@ struct ExtractInfo {
     std::unordered_map<std::tuple<gpf::EdgeId, std::size_t, std::size_t>, std::size_t, EdgeVertexKeyHash> edge_vertex_map;
     std::unordered_map<std::tuple<gpf::FaceId, std::size_t, std::size_t, std::size_t>, std::size_t, FaceVertexKeyHash> face_vertex_map;
     std::unordered_map<std::array<std::size_t, 4>, std::size_t, CellVertexKeyHash> cell_vertex_map;
+    std::unordered_map<gpf::FaceId, std::vector<std::size_t>> boundary_faces_map;
 
     std::size_t add_vertex(const gpf::VertexId vid) {
         return vertex_map.emplace(vid, points.size()).first->second;
@@ -515,6 +516,8 @@ void MaterialInterface::extract(
     const auto n_old_global_points = info.points.size();
     std::unordered_set<gpf::FaceId> kept_faces;
     std::vector<std::size_t> point_indices(mesh.n_vertices_capacity(), gpf::kInvalidIndex);
+    std::unordered_set<gpf::FaceId> new_boundary_faces;
+    std::unordered_map<gpf::FaceId, std::size_t> reverse_old_face_map;
     for (const auto face : mesh.faces()) {
         const auto& face_props = face.data().property;
         bool keep = false;
@@ -522,9 +525,20 @@ void MaterialInterface::extract(
             keep = face_props.materials[0] >= 4 && face_props.materials[1] >= 4;
         } else if (face_props.has_boundary) {
             const auto pid = face_props.materials[0];
-            if(cells[face_props.cells[0]].material == face_props.materials[1]) {
-                const auto& mat = materials[face_props.materials[1] - 4];
-                keep = ranges::any_of(ranges::iota_view{1, 4}, [pid, &mat](auto i) { return std::abs(mat[(i + pid) % 4]) > 1e-8;});
+            assert(cells[face_props.cells[0]].material == face_props.materials[1]);
+            const auto& mat = materials[face_props.materials[1] - 4];
+            if(ranges::any_of(ranges::iota_view{1, 4}, [pid, &mat](auto i) { return std::abs(mat[(i + pid) % 4]) > 1e-8;})) {
+                const auto tet_fid = tet.faces[pid];
+                auto iter = info.boundary_faces_map.find(tet_fid);
+                if (iter != info.boundary_faces_map.end()) {
+                    if(iter->second[0] > face_props.materials[1]) {
+                        reverse_old_face_map[tet_fid] = face_props.materials[1];
+                    }  else {
+                    }
+                } else {
+                    new_boundary_faces.emplace(face.id);
+                    keep = true;
+                }
             }
         }
 
@@ -536,6 +550,13 @@ void MaterialInterface::extract(
                     point_indices[he.to().id.idx] = 0;
                 }
             }
+        }
+    }
+    for (const auto [tet_fid, mid] : reverse_old_face_map) {
+        auto& vec = info.boundary_faces_map[tet_fid];
+        vec[0] = mid;
+        for (std::size_t i = 1; i < vec.size(); i++) {
+            ranges::reverse(info.faces[vec[i]]);
         }
     }
 
@@ -646,6 +667,15 @@ void MaterialInterface::extract(
         const auto& f_props = face.data().property;
         const auto& f_materials = f_props.materials;
         if (f_materials[0] < 4) {
+            if (new_boundary_faces.contains(fid)) {
+                const auto tet_fid = tet.faces[f_materials[0]];
+                auto it = info.boundary_faces_map.find(tet_fid);
+                if (it == info.boundary_faces_map.end()) {
+                    info.boundary_faces_map.emplace(tet_fid, std::vector{f_materials[1], info.faces.size()});
+                } else {
+                    it->second.emplace_back(info.faces.size());
+                }
+            }
             info.faces.emplace_back(face.halfedges() | views::transform([&point_indices](auto he) {
                 return point_indices[he.to().id.idx];
             }) | ranges::to<std::vector>());

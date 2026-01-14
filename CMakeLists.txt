@@ -14,24 +14,23 @@ set(CGAL_DO_NOT_WARN_ABOUT_CMAKE_BUILD_TYPE ON)
 find_package(CGAL REQUIRED)
 
 CPMAddPackage("gh:CLIUtils/CLI11#v2.6.1")
-# CPMAddPackage("gh:liukaizheng/mesh#main")
-CPMAddPackage(
-    NAME mesh
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../mesh
-)
+CPMAddPackage("gh:liukaizheng/mesh#main")
+# CPMAddPackage(
+#     NAME mesh
+#     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../mesh
+# )
 CPMAddPackage(
     NAME libigl
     GIT_TAG main
     GITHUB_REPOSITORY liukaizheng/libigl
-    OPTIONS
-        "LIBIGL_COPYLEFT_TETGEN ON"
 )
 
-CPMAddPackage("gh:BowenFu/matchit.cpp#main")
-CPMAddPackage(
-    NAME predicates
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../predicates
-)
+# CPMAddPackage(
+#     NAME predicates
+#     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../predicates
+# )
+CPMAddPackage("gh:liukaizheng/predicates#main")
+
 CPMAddPackage("gh:qnzhou/MshIO#main")
 
 add_executable(multi-label-partition
@@ -46,8 +45,6 @@ target_link_libraries(multi-label-partition PRIVATE
     Eigen3::Eigen
     gpf::mesh
     igl::core
-    igl_copyleft::tetgen
-    matchit
     predicates
     mshio::mshio
 )

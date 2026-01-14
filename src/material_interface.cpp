@@ -1068,9 +1068,6 @@ void do_material_interface(
                 tet_material_set.insert(m);
             }
         }
-        if (tvs[0].idx == 33557 && tvs[1].idx == 42399 && tvs[2].idx == 42401 && tvs[3].idx == 16516) {
-            const auto a = 2;
-        }
 
         auto mi = base_mi;
         mi.materials.reserve(tet_material_set.size());

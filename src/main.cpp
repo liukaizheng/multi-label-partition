@@ -31,7 +31,6 @@
 
 #include <fstream>
 #include <igl/readOBJ.h>
-#include <igl/copyleft/tetgen/tetrahedralize.h>
 #include <format>
 #include <print>
 #include <ranges>
@@ -73,6 +72,7 @@ using RowSpMat = Eigen::SparseMatrix<double, Eigen::RowMajor>;
 
 namespace ranges = std::ranges;
 namespace views = std::views;
+namespace PMP = CGAL::Polygon_mesh_processing;
 
 void write_msh(const std::string& name, const tet_mesh::TetMesh& mesh) {
     std::ofstream out(name);
@@ -150,6 +150,15 @@ auto read_colored_mesh(const std::string& file_name) {
                 })
             | ranges::to<std::vector>()
     );
+}
+
+void tetrahedralize_by_cgal(
+    const std::vector<std::array<double, 3>>& points,
+    const std::vector<std::vector<std::size_t>>& faces
+) {
+    Mesh mesh;
+    PMP::polygon_soup_to_polygon_mesh(points, faces, mesh);
+    const auto a = 2;
 }
 
 auto read_msh(const std::string& file_name) {
@@ -272,82 +281,6 @@ auto build_tet_mesh1(
     return std::make_pair(std::move(mesh), std::move(tets));
 }
 
-auto build_tet_mesh(
-    const VMat& TV,
-    const TMat& TT,
-    const FMat& TF
-) {
-    auto hash = [](const std::array<std::size_t, 3>& key) {
-        return boost::hash_value(key);
-    };
-    auto hash_key = [](const std::array<std::size_t, 3>& key) {
-        auto ret = key;
-        std::sort(ret.begin(), ret.end());
-        return ret;
-    };
-    std::unordered_map<std::array<std::size_t, 3>, std::size_t, decltype(hash)> face_index_map(TT.rows() * 2, std::move(hash));
-    std::vector<std::array<std::size_t, 3>> faces;
-    for (std::size_t i = 0; i < TF.rows(); ++i) {
-        std::array<std::size_t, 3> face = {TF(i, 0), TF(i, 1), TF(i, 2)};
-        face_index_map.emplace(hash_key(face), faces.size());
-        faces.emplace_back(std::move(face));
-    }
-
-    std::vector<std::array<std::size_t, 2>> face_tets(faces.size(), {{gpf::kInvalidIndex, gpf::kInvalidIndex}});
-    std::vector<tet_mesh::Tet> tets;
-    for (std::size_t i = 0; i < TT.rows(); ++i) {
-        auto t = TT.row(i);
-        std::array<gpf::FaceId, 4> tet_faces;
-        std::size_t idx = 0;
-        for (auto&& face : {
-            std::array<std::size_t, 3>{{t[2], t[1], t[3]}},
-            std::array<std::size_t, 3>{{t[0], t[2], t[3]}},
-            std::array<std::size_t, 3>{{t[1], t[0], t[3]}},
-            std::array<std::size_t, 3>{{t[0], t[1], t[2]}}
-        }) {
-            auto iter = face_index_map.emplace(hash_key(face), faces.size());
-            tet_faces[idx] = gpf::FaceId{iter.first->second};
-            if (iter.second) {
-                faces.emplace_back(std::move(face));
-                face_tets.emplace_back(std::array<std::size_t, 2>{{i, gpf::kInvalidIndex}});
-            } else {
-                if (face_tets[iter.first->second][0] == gpf::kInvalidIndex) {
-                    face_tets[iter.first->second][0] = i;
-                } else {
-                    face_tets[iter.first->second][1] = i;
-                }
-            }
-            idx += 1;
-        }
-        tets.emplace_back(tet_mesh::Tet{.vertices{gpf::VertexId{t[0]}, gpf::VertexId{t[1]}, gpf::VertexId{t[2]}, gpf::VertexId{t[3]}}, .faces{std::move(tet_faces)}});
-    }
-    auto mesh = tet_mesh::TetMesh::new_in(std::move(faces));
-    for (auto& tet : tets) {
-        const auto& vertices = tet.vertices;
-        auto& edges = tet.edges;
-        std:size_t idx = 0;
-        for (std::size_t i = 0; i < 3; i++) {
-            for (std::size_t j = i + 1; j < 4; j++) {
-                const auto eid = mesh.e_from_vertices(vertices[i], vertices[j]);
-                edges[idx++] = eid;
-            }
-        }
-    }
-    for (auto v : mesh.vertices()) {
-        auto& p = v.data().property.pt;
-        auto q = TV.row(v.id.idx).eval();
-        p[0] = q[0];
-        p[1] = q[1];
-        p[2] = q[2];
-    }
-
-    for (auto f : mesh.faces()) {
-        f.data().property.cells = std::move(face_tets[f.id.idx]);
-    }
-
-    return std::make_pair(std::move(mesh), std::move(tets));
-}
-
 auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<Triangle>>& triangle_groups) {
     std::vector<Tree> trees;
     trees.reserve(triangle_groups.size());
@@ -379,33 +312,9 @@ int main(int argc, char* argv[]) {
     std::vector<std::array<std::size_t, 3>> colors;
     auto [points, faces, label_face_groups] = read_colored_mesh(mesh_path);
     auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
+    // tetrahedralize_by_cgal(points, faces);
     auto[tet_points, tet_indices] = read_msh(msh_path);
-
-    // VMat V(points.size(), 3);
-    // FMat F(faces.size(), 3);
-    // for (std::size_t i = 0; i < points.size(); ++i) {
-        // const auto& p = points[i];
-        // V.row(i) << p[0], p[1], p[2];
-    // }
-    // for (std::size_t i = 0; i < faces.size(); ++i) {
-        // const auto& f = faces[i];
-        // F.row(i) << f[0], f[1], f[2];
-    // }
-
-    // VMat TV;
-    // TMat TT;
-    // FMat TF;
-
-    // igl::copyleft::tetgen::tetrahedralize(V, F, "pa0.004V", TV, TT, TF);
-    // auto [tet_mesh, tets] = build_tet_mesh(TV, TT, TF);
-
     auto [tet_mesh, tets] = build_tet_mesh1(tet_points, tet_indices);
-    // auto it = ranges::find_if(tets, [](const auto& tet) {
-        // const auto& tvs = tet.vertices;
-        // return tvs[0].idx == 33557 && tvs[1].idx == 42399 && tvs[2].idx == 42401 && tvs[3].idx == 16516;
-    // });
-    // std::iter_swap(tets.begin(), it);
-
 
     // write_msh("123.obj", tet_mesh);
     setup_neg_distance(tet_mesh, triangle_groups);

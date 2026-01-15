@@ -6,7 +6,6 @@
 #include "gpf/utils.hpp"
 #include "tet_mesh.hpp"
 
-#include <bit>
 #include <iterator>
 #include <numeric>
 #include <predicates/predicates.hpp>
@@ -50,6 +49,7 @@ struct VertexProp {
     std::array<gpf::VertexId, 2> parents;
     std::array<std::array<double, 2>, 2> vals;
     std::array<double, 2> ori{{0.0, 1.0}};
+    std::size_t global_id{gpf::kInvalidIndex};
 };
 
 struct EdgeProp {
@@ -58,9 +58,9 @@ struct EdgeProp {
 };
 
 struct FaceProp {
-    std::array<std::size_t, 2> materials;
+    std::array<std::size_t, 2> materials; // 0 point outside, 1 point innerside
     std::array<std::size_t, 2> cells{{0, gpf::kInvalidIndex}};
-    bool has_boundary{false};
+    bool keep{false};
 };
 
 struct Cell {
@@ -100,11 +100,13 @@ struct CellVertexKeyHash {
 struct ExtractInfo {
     std::vector<std::array<double, 3>> points;
     std::vector<std::vector<std::size_t>> faces;
+    std::vector<std::array<std::size_t, 2>> face_materials;
     std::unordered_map<gpf::VertexId, std::size_t> vertex_map;
     std::unordered_map<std::tuple<gpf::EdgeId, std::size_t, std::size_t>, std::size_t, EdgeVertexKeyHash> edge_vertex_map;
     std::unordered_map<std::tuple<gpf::FaceId, std::size_t, std::size_t, std::size_t>, std::size_t, FaceVertexKeyHash> face_vertex_map;
     std::unordered_map<std::array<std::size_t, 4>, std::size_t, CellVertexKeyHash> cell_vertex_map;
     std::unordered_map<gpf::FaceId, std::vector<std::size_t>> boundary_faces_map;
+
 
     std::size_t add_vertex(const gpf::VertexId vid) {
         return vertex_map.emplace(vid, points.size()).first->second;
@@ -502,6 +504,7 @@ void MaterialInterface::add_material(const std::array<double, 4>& material) {
     split_edges();
     split_faces();
     split_cells(max_v_idx);
+    //TODO: delete this
     auto face_vertices = mesh.faces() |
         views::transform([](const auto& face) {
             return views::transform(face.halfedges(), [](const auto& he) {
@@ -517,72 +520,37 @@ void MaterialInterface::extract(
     const std::vector<std::size_t>& material_indices
 ) noexcept {
     const auto n_old_global_points = info.points.size();
-    std::unordered_set<gpf::FaceId> kept_faces;
-    std::vector<std::size_t> point_indices(mesh.n_vertices_capacity(), gpf::kInvalidIndex);
-    std::unordered_set<gpf::FaceId> new_boundary_faces;
-    std::unordered_map<gpf::FaceId, std::size_t> reverse_old_face_map;
     for (const auto face : mesh.faces()) {
-        const auto& face_props = face.data().property;
-        bool keep = false;
+        auto& face_props = face.data().property;
         if (face.id.idx >= 4) {
-            keep = face_props.materials[0] >= 4 && face_props.materials[1] >= 4;
-        } else if (face_props.has_boundary) {
+            face_props.keep = face_props.materials[0] >= 4 && face_props.materials[1] >= 4 &&
+                cells[face_props.cells[0]].material != cells[face_props.cells[1]].material;
+        } else if (!face_props.keep) {
             const auto pid = face_props.materials[0];
-            assert(cells[face_props.cells[0]].material == face_props.materials[1]);
-            const auto& mat = materials[face_props.materials[1] - 4];
-            if(ranges::any_of(ranges::iota_view{1, 4}, [pid, &mat](auto i) { return std::abs(mat[(i + pid) % 4]) > 1e-8;})) {
-                const auto tet_fid = tet.faces[pid];
-                auto iter = info.boundary_faces_map.find(tet_fid);
-                if (iter != info.boundary_faces_map.end()) {
-                    if(iter->second[0] > face_props.materials[1]) {
-                        reverse_old_face_map[tet_fid] = face_props.materials[1];
-                    } else if (iter->second[0] == face_props.materials[1]){
-                        const auto& vec = iter->second;
-                        for (std::size_t i = 1 ; i < vec.size(); i++) {
-                            info.faces[vec[i]].clear();
-                        }
-                    }
-                } else {
-                    new_boundary_faces.emplace(face.id);
-                    keep = true;
-                }
-            }
+            face_props.keep = tet_mesh.face(tet.faces[pid]).data().property.cells[1] == gpf::kInvalidIndex;
         }
 
-        if (keep) {
-            kept_faces.emplace(face.id);
+        if (face_props.keep) {
             for (const auto he : face.halfedges()) {
-                auto vid = he.to().id.idx;
-                if (point_indices[vid] == gpf::kInvalidIndex) {
-                    point_indices[he.to().id.idx] = 0;
-                }
+                he.to().data().property.global_id = 0;
             }
         }
-    }
-    for (const auto [tet_fid, mid] : reverse_old_face_map) {
-        auto& vec = info.boundary_faces_map[tet_fid];
-        vec[0] = mid;
-        for (std::size_t i = 1; i < vec.size(); i++) {
-            ranges::reverse(info.faces[vec[i]]);
-        }
-    }
-
-    if (kept_faces.empty()) {
-        return;
     }
 
     using Mat = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
-    Mat V(point_indices.size(), 3);
+    Mat V(mesh.n_vertices_capacity(), 3);
 
     #ifndef NDEBUG
-    Eigen::MatrixXd VM(point_indices.size(), material_indices.size());
+    Eigen::MatrixXd VM(V.rows(), material_indices.size());
     #endif
-    for (std::size_t vid = 0; vid < point_indices.size(); ++vid) {
+    for (std::size_t vid = 0; vid < mesh.n_vertices_capacity(); ++vid) {
+        auto& v_props = mesh.vertex_data(gpf::VertexId{vid}).property;
+        auto& global_vid = v_props.global_id;
         if (vid < 4) {
             V.row(vid) = Eigen::RowVector3d::ConstMapType(tet_mesh.vertex(tet.vertices[vid]).data().property.pt.data());
-            if (point_indices[vid] != gpf::kInvalidIndex) {
-                point_indices[vid] = info.add_vertex(tet.vertices[vid]);
-                if (point_indices[vid] == info.points.size()) {
+            if (global_vid != gpf::kInvalidIndex) {
+                global_vid = info.add_vertex(tet.vertices[vid]);
+                if (global_vid == info.points.size()) {
                     info.points.emplace_back(std::array<double, 3>{{V(vid, 0), V(vid, 1), V(vid, 2)}});
                 }
 
@@ -592,23 +560,23 @@ void MaterialInterface::extract(
                 VM(vid, i) = materials[i][vid];
             }
             #endif
-        } else if (point_indices[vid] != gpf::kInvalidIndex) {
+        } else if (global_vid != gpf::kInvalidIndex) {
             const auto& vm = mesh.vertex(gpf::VertexId{vid}).data().property.materials; // vertex materials
             const auto count = ranges::distance(ranges::begin(vm), ranges::find_if(vm, [](const auto m) {return m >= 4; }));
             assert(count <= 2);
             switch(count) {
             case 0:
-                point_indices[vid] = info.add_vertex(material_indices[vm[0] - 4], material_indices[vm[1] - 4], material_indices[vm[2] - 4], material_indices[vm[3] - 4]);
+                global_vid = info.add_vertex(material_indices[vm[0] - 4], material_indices[vm[1] - 4], material_indices[vm[2] - 4], material_indices[vm[3] - 4]);
                 break;
             case 1:
-                point_indices[vid] = info.add_vertex(tet.faces[vm[0]], material_indices[vm[1] - 4], material_indices[vm[2] - 4], material_indices[vm[3] - 4]);
+                global_vid = info.add_vertex(tet.faces[vm[0]], material_indices[vm[1] - 4], material_indices[vm[2] - 4], material_indices[vm[3] - 4]);
                 break;
             case 2:
-                point_indices[vid] = info.add_vertex(tet.edges[tet_mesh::Tet::edge_index(vm[0], vm[1])], material_indices[vm[2] - 4], material_indices[vm[3] - 4]);
+                global_vid = info.add_vertex(tet.edges[tet_mesh::Tet::edge_index(vm[0], vm[1])], material_indices[vm[2] - 4], material_indices[vm[3] - 4]);
                 break;
             }
-            if (point_indices[vid] != info.points.size()) {
-                V.row(vid) = Eigen::RowVector3d::ConstMapType(info.points[point_indices[vid]].data());
+            if (global_vid != info.points.size()) {
+                V.row(vid) = Eigen::RowVector3d::ConstMapType(info.points[global_vid].data());
 
                 #ifndef NDEBUG
                 const auto& v_props = mesh.vertex_data(gpf::VertexId{vid}).property;
@@ -669,34 +637,78 @@ void MaterialInterface::extract(
         }
     }
 
-    for (const auto fid : kept_faces) {
-        const auto face = mesh.face(fid);
-        const auto& f_props = face.data().property;
-        const auto& f_materials = f_props.materials;
-        if (f_materials[0] < 4) {
-            if (new_boundary_faces.contains(fid)) {
-                const auto tet_fid = tet.faces[f_materials[0]];
-                auto it = info.boundary_faces_map.find(tet_fid);
-                if (it == info.boundary_faces_map.end()) {
-                    info.boundary_faces_map.emplace(tet_fid, std::vector{f_materials[1], info.faces.size()});
+    std::array<int8_t, 4> is_new_boundary_faces = {{ -1, -1, -1, -1 }};
+
+    for (auto face : mesh.faces()) {
+        auto& f_props = face.data().property;
+        if (!f_props.keep) {
+            continue;
+        }
+
+        auto pid = f_props.materials[0];
+        if (pid < 4) {
+            const auto tet_fid = tet.faces[pid];
+
+            if (is_new_boundary_faces[pid] < 0) {
+                is_new_boundary_faces[pid] = info.boundary_faces_map.find(tet_fid) == info.boundary_faces_map.end();
+            }
+
+            auto face_vertices = face.halfedges() |
+                views::transform([] (auto he) { return he.to().data().property.global_id; }) |
+                ranges::to<std::vector>();
+            const auto mid = material_indices[cells[f_props.cells[0]].material - 4];
+            if (is_new_boundary_faces[pid]) {
+                info.boundary_faces_map[tet_fid].emplace_back(info.faces.size());
+                info.faces.emplace_back(std::move(face_vertices));
+                info.face_materials.emplace_back(
+                    std::array<std::size_t, 2> {{ mid, gpf::kInvalidIndex}}
+                );
+            } else {
+                assert(info.boundary_faces_map.contains(tet_fid));
+                auto& face_indices = info.boundary_faces_map[tet_fid];
+                auto iter = ranges::find_if(face_indices, [&face_vertices, &info](const auto global_fid) {
+                    const auto& verts = info.faces[global_fid];
+                    if (verts.empty()) {
+                        return false;
+                    }
+                    auto it = ranges::find(verts, face_vertices[0]);
+                    if (it == ranges::end(verts)) {
+                        return false;
+                    }
+                    auto start_id = std::distance(verts.begin(), it);
+                    for (std::size_t idx = 1; idx < 3; ++idx) {
+                        if (face_vertices[idx] != verts[(start_id + verts.size() - idx) % verts.size()]) {
+                            return false;
+                        }
+                    }
+                    return true;
+                });
+                assert(iter != face_indices.end());
+                auto other_mid = info.face_materials[*iter][0];
+                assert(other_mid != gpf::kInvalidIndex && info.face_materials[*iter][1] == gpf::kInvalidIndex);
+                if (mid == other_mid) {
+                    info.face_materials[*iter][1] = mid;
+                    info.faces[*iter].clear();
+                } else if (mid < other_mid) {
+                    info.face_materials[*iter][0] = mid;
+                    info.face_materials[*iter][1] = other_mid;
+                    info.faces[*iter].swap(face_vertices);
                 } else {
-                    it->second.emplace_back(info.faces.size());
+                    info.face_materials[*iter][1] = mid;
                 }
             }
-            info.faces.emplace_back(face.halfedges() | views::transform([&point_indices](auto he) {
-                return point_indices[he.to().id.idx];
-            }) | ranges::to<std::vector>());
         } else {
             assert(cells[f_props.cells[0]].material > cells[f_props.cells[1]].material);
-            info.faces.emplace_back(face.halfedges_reverse() | views::transform([&point_indices](auto he) {
-                return point_indices[he.to().id.idx];
+            info.faces.emplace_back(face.halfedges_reverse() | views::transform([](auto he) {
+                return he.to().data().property.global_id;
             }) | ranges::to<std::vector>());
-        }
-        auto& f = info.faces.back();
-        if (f[0] == 2463 && f[1] == 2871 && f[2] == 2460) {
-            const auto a = 2;
+            info.face_materials.emplace_back(std::array<std::size_t, 2>{{
+                material_indices[cells[f_props.cells[1]].material - 4],
+                material_indices[cells[f_props.cells[0]].material - 4]
+            }});
         }
     }
+
 }
 
 double MaterialInterface::compute_vert_orientations(const gpf::VertexId vid) {
@@ -970,12 +982,12 @@ void MaterialInterface::split_cells(const std::size_t max_v_idx) noexcept {
                 auto& f_props = face.data().property;
                 assert(f_props.cells[coplanar_ori_fid & 1] == cid);
                 f_props.cells[coplanar_ori_fid & 1] = n_old_cells;
-                f_props.has_boundary = true;
+                f_props.keep = true;
                 cells[cid].faces.clear();
                 neg_cell_faces.emplace_back(coplanar_ori_fid);
                 f_props.materials[1] = mid;
             } else {
-                mesh.face(new_fid).data().property.has_boundary = true;
+                mesh.face(new_fid).data().property.keep = true;
             }
         } else if (n_halfedges >= 3) {
             new_fid = mesh.add_face_by_halfedges(new_halfedges, true);
@@ -1056,8 +1068,8 @@ void do_material_interface(
 
         const auto& tvs = tet.vertices;
         if (ranges::count_if(tvs, [](const auto vid) {
-            return vid.idx == 51204 || vid.idx == 51205;
-        }) >= 2) {
+            return vid.idx == 25124 || vid.idx == 246 || vid.idx == 41718;
+        }) >= 3) {
             const auto a = 2;
         }
         for (std::size_t i = 0; i < 4; i++) {

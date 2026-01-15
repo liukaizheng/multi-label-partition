@@ -29,6 +29,9 @@ auto write_mesh(const std::string& name, const std::vector<std::array<double, 3>
         file << "v " << uv[i][0] << " " << uv[i][1] <<" " << uv[i][2] << "\n";
     }
     for (Eigen::Index i = 0; i < F.size(); ++i) {
+        if (F[i].empty()) {
+            continue;
+        }
         file << "f";
         for (Eigen::Index j = 0; j < F[i].size(); ++j) {
             file << "  " << F[i][j] + 1;
@@ -533,7 +536,11 @@ void MaterialInterface::extract(
                 if (iter != info.boundary_faces_map.end()) {
                     if(iter->second[0] > face_props.materials[1]) {
                         reverse_old_face_map[tet_fid] = face_props.materials[1];
-                    }  else {
+                    } else if (iter->second[0] == face_props.materials[1]){
+                        const auto& vec = iter->second;
+                        for (std::size_t i = 1 ; i < vec.size(); i++) {
+                            info.faces[vec[i]].clear();
+                        }
                     }
                 } else {
                     new_boundary_faces.emplace(face.id);
@@ -684,6 +691,10 @@ void MaterialInterface::extract(
             info.faces.emplace_back(face.halfedges_reverse() | views::transform([&point_indices](auto he) {
                 return point_indices[he.to().id.idx];
             }) | ranges::to<std::vector>());
+        }
+        auto& f = info.faces.back();
+        if (f[0] == 2463 && f[1] == 2871 && f[2] == 2460) {
+            const auto a = 2;
         }
     }
 }
@@ -932,21 +943,23 @@ void MaterialInterface::split_cells(const std::size_t max_v_idx) noexcept {
             }
         }
 
-        if (coplanar_ori_fid == gpf::kInvalidIndex && n_halfedges < 3) {
+        if (coplanar_ori_fid == gpf::kInvalidIndex && n_halfedges < 3 && neg_cell_faces.empty()) {
             continue;
         }
-        assert(coplanar_ori_fid != gpf::kInvalidIndex || start_zero_vid.valid());
+        assert(coplanar_ori_fid != gpf::kInvalidIndex || start_zero_vid.valid() || !neg_cell_faces.empty());
 
-        auto curr_vh = mesh.vertex(start_zero_vid);
         std::vector<gpf::HalfedgeId> new_halfedges;
-        new_halfedges.reserve(n_halfedges);
+        if (coplanar_ori_fid == gpf::kInvalidIndex && n_halfedges >= 3) {
+            auto curr_vh = mesh.vertex(start_zero_vid);
+            new_halfedges.reserve(n_halfedges);
 
-        while(coplanar_ori_fid == gpf::kInvalidIndex) {
-            auto he = curr_vh.halfedge();
-            new_halfedges.emplace_back(he.id);
-            curr_vh = he.to();
-            if (curr_vh.id == start_zero_vid) {
-                break;
+            while(true) {
+                auto he = curr_vh.halfedge();
+                new_halfedges.emplace_back(he.id);
+                curr_vh = he.to();
+                if (curr_vh.id == start_zero_vid) {
+                    break;
+                }
             }
         }
         if (coplanar_ori_fid != gpf::kInvalidIndex) {
@@ -964,7 +977,7 @@ void MaterialInterface::split_cells(const std::size_t max_v_idx) noexcept {
             } else {
                 mesh.face(new_fid).data().property.has_boundary = true;
             }
-        } else {
+        } else if (n_halfedges >= 3) {
             new_fid = mesh.add_face_by_halfedges(new_halfedges, true);
             auto& new_face_props = mesh.face(new_fid).data().property;
             new_face_props.cells = {{n_old_cells, cid}};
@@ -1042,6 +1055,11 @@ void do_material_interface(
         }
 
         const auto& tvs = tet.vertices;
+        if (ranges::count_if(tvs, [](const auto vid) {
+            return vid.idx == 51204 || vid.idx == 51205;
+        }) >= 2) {
+            const auto a = 2;
+        }
         for (std::size_t i = 0; i < 4; i++) {
             auto p1 = &corners[i * 3];
             const auto& p2 = tet_mesh.vertex_data(tvs[i]).property.pt;
@@ -1080,13 +1098,6 @@ void do_material_interface(
             }
             return material;
         }) | ranges::to<std::vector>();
-
-        std::vector<std::array<std::size_t, 4>> material_int_values(materials.size());
-        for (std::size_t i = 0; i < materials.size(); ++i) {
-            for (std::size_t j = 0; j < 4; ++j) {
-                material_int_values[i][j] = std::bit_cast<std::size_t>(materials[i][j]);
-            }
-        }
 
         for (const auto& m : materials) {
             mi.add_material(m);

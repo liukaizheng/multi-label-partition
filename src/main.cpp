@@ -14,6 +14,13 @@
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
 #include <CGAL/boost/graph/Euler_operations.h>
 #include <CGAL/boost/graph/helpers.h>
+#include <CGAL/Polyhedral_mesh_domain_with_features_3.h>
+#include <CGAL/Polyhedron_3.h>
+#include <CGAL/boost/graph/copy_face_graph.h>
+#include <CGAL/Mesh_triangulation_3.h>
+#include <CGAL/Mesh_complex_3_in_triangulation_3.h>
+#include <CGAL/Mesh_criteria_3.h>
+#include <CGAL/make_mesh_3.h>
 
 #include <algorithm>
 #include <array>
@@ -51,12 +58,19 @@ using Fb_info = CGAL::Triangulation_face_base_with_info_2<bool, Kernel>;
 using Fb = CGAL::Constrained_triangulation_face_base_2<Kernel, Fb_info>;
 using Tds = CGAL::Triangulation_data_structure_2<Vb, Fb>;
 using CDT = CGAL::Constrained_Delaunay_triangulation_2<Kernel, Tds>;
+using Mesh_domain = CGAL::Polyhedral_mesh_domain_with_features_3<Kernel>;
+using Polyhedron = Mesh_domain::Polyhedron;
 
 using Triangle = Kernel::Triangle_3;
 using Iterator = std::vector<Triangle>::const_iterator;
 using Primitive = CGAL::AABB_triangle_primitive_3<Kernel, Iterator>;
 using AABB_triangle_traits = CGAL::AABB_traits_3<Kernel, Primitive>;
 using Tree = CGAL::AABB_tree<AABB_triangle_traits>;
+
+using Tr = CGAL::Mesh_triangulation_3<Mesh_domain>::type;
+using C3t3 = CGAL::Mesh_complex_3_in_triangulation_3<Tr>;
+using Mesh_criteria = CGAL::Mesh_criteria_3<Tr>;
+
 
 using VMat = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
 using VMat2 = Eigen::Matrix<double, Eigen::Dynamic, 2>;
@@ -152,13 +166,44 @@ auto read_colored_mesh(const std::string& file_name) {
     );
 }
 
-void tetrahedralize_by_cgal(
+auto tetrahedralize_by_cgal(
     const std::vector<std::array<double, 3>>& points,
     const std::vector<std::vector<std::size_t>>& faces
 ) {
     Mesh mesh;
+
     PMP::polygon_soup_to_polygon_mesh(points, faces, mesh);
-    const auto a = 2;
+    Polyhedron polyhedron;
+    CGAL::copy_face_graph(mesh, polyhedron);
+    Mesh_domain domain{polyhedron};
+    domain.detect_features(60); // angle in degrees
+    Mesh_criteria criteria(
+        CGAL::parameters::edge_size = 1.1,
+        CGAL::parameters::facet_angle = 30,
+        // CGAL::parameters::facet_size = 0.1,
+        // CGAL::parameters::facet_distance = 0.01,
+        // CGAL::parameters::cell_radius_edge_ratio = 3,
+        CGAL::parameters::cell_size = 1.0
+    );
+    std::vector<std::array<double, 3>> tet_points;
+    std::vector<std::array<std::size_t, 4>> tets;
+    C3t3 c3t3 = CGAL::make_mesh_3<C3t3>(domain, criteria);
+    std::unordered_map<C3t3::Triangulation::Vertex_handle, std::size_t> vertex_index_map;
+    for (auto& v : c3t3.triangulation().finite_vertex_handles()) {
+        vertex_index_map[v] = tet_points.size();
+        auto& p = v->point();
+        tet_points.emplace_back(std::array<double, 3>{{p[0], p[1], p[2]}});
+    }
+    for (auto cell = c3t3.cells_begin(); cell != c3t3.cells_end(); cell++) {
+        std::array<std::size_t, 4> indices;
+        for (std::size_t i = 0; i < 4; i++) {
+            indices[i] = vertex_index_map[cell->vertex(i)];
+        }
+        tets.emplace_back(std::move(indices));
+
+    }
+
+    return std::make_pair(std::move(tet_points), std::move(tets));
 }
 
 auto read_msh(const std::string& file_name) {
@@ -312,11 +357,11 @@ int main(int argc, char* argv[]) {
     std::vector<std::array<std::size_t, 3>> colors;
     auto [points, faces, label_face_groups] = read_colored_mesh(mesh_path);
     auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
-    // tetrahedralize_by_cgal(points, faces);
+    // auto [tet_points, tet_indices] = tetrahedralize_by_cgal(points, faces);
     auto[tet_points, tet_indices] = read_msh(msh_path);
     auto [tet_mesh, tets] = build_tet_mesh1(tet_points, tet_indices);
 
-    // write_msh("123.obj", tet_mesh);
+    write_msh("123.obj", tet_mesh);
     setup_neg_distance(tet_mesh, triangle_groups);
     do_material_interface(tets, tet_mesh);
     return 0;

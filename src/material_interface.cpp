@@ -97,6 +97,7 @@ struct CellVertexKeyHash {
     }
 };
 
+
 struct ExtractInfo {
     std::vector<std::array<double, 3>> points;
     std::vector<std::vector<std::size_t>> faces;
@@ -124,6 +125,76 @@ struct ExtractInfo {
         return cell_vertex_map.emplace(std::array<std::size_t, 4>{{ m1, m2, m3, m4 }}, points.size()).first->second;
     }
 
+    void remove_deleted_faces() {
+        std::size_t idx = 0;
+        for (std::size_t i = 0; i < faces.size(); i++) {
+            if (faces[i].empty()) {
+                continue;
+            }
+            if (i != idx) {
+                faces[idx] = std::move(faces[i]);
+                face_materials[idx] = std::move(face_materials[i]);
+            }
+            idx++;
+        }
+        faces.resize(idx);
+        face_materials.resize(idx);
+    }
+
+    auto extract_manifold_patches() {
+        remove_deleted_faces();
+
+        struct ExtractFaceProp {
+            bool visited{false};
+        };
+        auto mesh = gpf::SurfaceMesh<gpf::Empty, gpf::Empty, gpf::Empty, ExtractFaceProp>::new_in(faces);
+        std::vector<std::vector<std::size_t>> patches;
+        for (const auto face : mesh.faces()) {
+            if (face.data().property.visited) {
+                continue;
+            }
+            face.data().property.visited = true;
+            std::vector<std::size_t> patch {face.id.idx};
+            for (std::size_t i = 0; i < patch.size(); i++) {
+                for (const auto he : mesh.face(gpf::FaceId{patch[i]}).halfedges()) {
+                    if (he.sibling().sibling().id != he.id) {
+                        continue;
+                    }
+
+                    // If this edge is manifold-edge
+                    auto h = he.sibling();
+                    auto f = h.face();
+                    auto& f_props = f.data().property;
+                    if (!f_props.visited) {
+                        f_props.visited = true;
+                        patch.emplace_back(f.id.idx);
+                    }
+                }
+            }
+            patches.emplace_back(std::move(patch));
+        }
+        return patches;
+    }
+
+    auto extract_material_cells(const std::size_t n_materials) {
+        auto patches = extract_manifold_patches();
+        auto patch_materials = patches | views::transform([this](const auto& patch) {
+            auto iter = ranges::find_if(patch, [this] (const auto fid) {
+                return face_materials[fid][0] != gpf::kInvalidIndex;
+            });
+            assert(iter != patch.end());
+            return face_materials[*iter];
+        }) | ranges::to<std::vector>();
+
+        std::vector<std::vector<std::size_t>> material_patches(n_materials);
+        for (std::size_t i = 0; i < patch_materials.size(); ++i) {
+            const auto& materials = patch_materials[i];
+            material_patches[materials[0]].emplace_back(gpf::oriented_index(i, false));
+            if (materials[1] != gpf::kInvalidIndex)
+                material_patches[materials[1]].emplace_back(gpf::oriented_index(i, true));
+        }
+        return std::make_pair(std::move(patches), std::move(material_patches));
+    }
 };
 
 struct MaterialInterface {
@@ -504,13 +575,12 @@ void MaterialInterface::add_material(const std::array<double, 4>& material) {
     split_edges();
     split_faces();
     split_cells(max_v_idx);
-    //TODO: delete this
-    auto face_vertices = mesh.faces() |
-        views::transform([](const auto& face) {
-            return views::transform(face.halfedges(), [](const auto& he) {
-                return he.to().id.idx;
-            });
-        }) | ranges::to<std::vector<std::vector<std::size_t>>>();
+    // auto face_vertices = mesh.faces() |
+    //     views::transform([](const auto& face) {
+    //         return views::transform(face.halfedges(), [](const auto& he) {
+    //             return he.to().id.idx;
+    //         });
+    //     }) | ranges::to<std::vector<std::vector<std::size_t>>>();
     merge_negative_cell_faces();
 }
 void MaterialInterface::extract(
@@ -519,14 +589,13 @@ void MaterialInterface::extract(
     const tet_mesh::Tet& tet,
     const std::vector<std::size_t>& material_indices
 ) noexcept {
-    const auto n_old_global_points = info.points.size();
     for (const auto face : mesh.faces()) {
         auto& face_props = face.data().property;
-        if (face.id.idx >= 4) {
-            face_props.keep = face_props.materials[0] >= 4 && face_props.materials[1] >= 4 &&
+        const auto pid = face_props.materials[0];
+        if (pid >= 4) {
+            face_props.keep = face_props.materials[1] >= 4 &&
                 cells[face_props.cells[0]].material != cells[face_props.cells[1]].material;
         } else if (!face_props.keep) {
-            const auto pid = face_props.materials[0];
             face_props.keep = tet_mesh.face(tet.faces[pid]).data().property.cells[1] == gpf::kInvalidIndex;
         }
 
@@ -1054,15 +1123,29 @@ void do_material_interface(
 
     ExtractInfo info;
     std::array<double, 12> corners;
-    std::size_t tid = 0;
     for (const auto &tet : tets) {
-        tid += 1;
         std::unordered_set<std::size_t> tet_material_set;
         for (const auto vid : tet.vertices) {
             const auto idx = vid.idx;
             tet_material_set.insert(v_high_materials.begin() + separators[idx], v_high_materials.begin() + separators[idx + 1]);
         }
         if (tet_material_set.size() < 2) {
+            for (const auto fid : tet.faces) {
+                auto face = tet_mesh.face(fid);
+                if (face.data().property.cells[1] != gpf::kInvalidIndex) {
+                    continue;
+                }
+
+                info.faces.emplace_back(views::transform(face.halfedges(), [&info](auto he) {
+                    auto vid = he.to().id;
+                    auto global_vid = info.add_vertex(vid);
+                    if (global_vid == info.points.size()) {
+                        info.points.emplace_back(he.mesh->vertex_data(vid).property.pt);
+                    }
+                    return global_vid;
+                }) | ranges::to<std::vector>());
+                info.face_materials.emplace_back(std::array<std::size_t, 2>{{gpf::kInvalidIndex, gpf::kInvalidIndex}});
+            }
             continue;
         }
 
@@ -1117,6 +1200,10 @@ void do_material_interface(
 
         mi.extract(info, tet_mesh, tet, tet_material_indices);
     }
-    write_mesh("output.obj", info.points, info.faces);
-    const auto a = 2;
+
+    auto [patches, material_cells] = info.extract_material_cells(n_materials);
+    // write_mesh("output.obj", info.points, info.faces);
+    // write_mesh("patch_0.obj", info.points, patches[0] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());
+    // write_mesh("patch_1.obj", info.points, patches[1] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());
+    // write_mesh("patch_2.obj", info.points, patches[2] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());
 }

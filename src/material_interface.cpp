@@ -1100,6 +1100,42 @@ void save_tet(
     out.close();
 }
 
+void write_material_cells(
+    const std::string& prefix,
+    const std::vector<std::array<double, 3>>& points,
+    const std::vector<std::vector<std::size_t>>& faces,
+    const std::vector<std::vector<std::size_t>>& patches,
+    const std::vector<std::vector<std::size_t>>& material_cells
+) {
+    for (std::size_t mid = 0; mid < material_cells.size(); ++mid) {
+        const auto& cell_patches = material_cells[mid];
+        std::vector<std::array<double, 3>> cell_points;
+        std::vector<std::vector<std::size_t>> cell_faces;
+        std::vector<std::size_t> point_map(points.size(), gpf::kInvalidIndex);
+
+        for (const auto ori_pid : cell_patches) {
+            const auto [pid, reversed] = gpf::decode_index(ori_pid);
+            const auto& patch = patches[pid];
+            for (const auto fid : patch) {
+                auto vertices = faces[fid] | views::transform([&] (auto i) {
+                    if (point_map[i] == gpf::kInvalidIndex) {
+                        point_map[i] = cell_points.size();
+                        cell_points.push_back(points[i]);
+                    }
+                    return point_map[i];
+                }) | ranges::to<std::vector>();
+                if (!reversed) {
+                    std::ranges::reverse(vertices);
+                }
+                for (std::size_t i = 1; i + 1 < vertices.size(); ++i) {
+                    cell_faces.push_back({vertices[0], vertices[i], vertices[i + 1]});
+                }
+            }
+        }
+        write_mesh(prefix + "_" + std::to_string(mid) + ".obj", cell_points, cell_faces);
+    }
+}
+
 void do_material_interface(
     const std::vector<tet_mesh::Tet> &tets,
     const tet_mesh::TetMesh &tet_mesh
@@ -1202,6 +1238,7 @@ void do_material_interface(
     }
 
     auto [patches, material_cells] = info.extract_material_cells(n_materials);
+    write_material_cells("material", info.points, info.faces, patches, material_cells);
     // write_mesh("output.obj", info.points, info.faces);
     // write_mesh("patch_0.obj", info.points, patches[0] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());
     // write_mesh("patch_1.obj", info.points, patches[1] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());

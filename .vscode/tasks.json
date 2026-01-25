@@ -2,7 +2,7 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Configure relief (Debug)",
+            "label": "Configure multi-label-partition (Debug)",
             "type": "shell",
             "command": "cmake",
             "args": [
@@ -18,7 +18,7 @@
             "problemMatcher": []
         },
         {
-            "label": "Build relief_app",
+            "label": "Build multi-label-partition",
             "type": "shell",
             "command": "cmake",
             "args": [
@@ -30,7 +30,7 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "dependsOn": "Configure relief (Debug)",
+            "dependsOn": "Configure multi-label-partition (Debug)",
             "problemMatcher": [
                 "$gcc"
             ]

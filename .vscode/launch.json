@@ -2,7 +2,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug relief_app",
+            "name": "Debug multi-label-partition",
             "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/build/multi-label-partition",
@@ -10,7 +10,7 @@
             "cwd": "${workspaceFolder}/build",
             "env": {},
             "stopOnEntry": false,
-            "preLaunchTask": "Build relief_app",
+            "preLaunchTask": "Build multi-label-partition",
             "console": "integratedTerminal"
         }
     ]

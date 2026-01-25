@@ -656,12 +656,20 @@ struct TracePolyline {
     struct EdgePoint {
         gpf::HalfedgeId hid;
         double t;
+        std::array<double, N> pt;
     };
 
-    using Anchor = std::variant<gpf::VertexId, EdgePoint>;
+    struct HalfedgeData {
+        double angle;
+        double signpost_angle;
+    };
+
+    using Anchor = std::variant<gpf::VertexId, std::size_t>;
 
     void trace_from_vertex(gpf::VertexId start_vid, const double* dir);
     std::vector<Anchor> path;
+    std::span<HalfedgeData> halfedge_data;
+    std::vector<EdgePoint> edge_points;
 };
 
 }
@@ -681,6 +689,16 @@ auto project_polylines_on_mesh(
     gpf::update_vertex_angle_sums(aux_mesh);
     gpf::update_halfedge_signpost_angles(aux_mesh);
     gpf::update_halfedge_vectors(aux_mesh);
+
+    std::vector<typename detail::TracePolyline<N>::HalfedgeData> trace_halfedge_data(mesh.n_halfedges_capacity());
+    for (auto he : aux_mesh.halfedges()) {
+        auto& prop = he.prop();
+        trace_halfedge_data[he.id.idx] = {
+            .angle = prop.angle,
+            .signpost_angle = prop.signpost_angle,
+        };
+    }
+
     detail::FlipGeodesic flip_geodesic{.mesh = &aux_mesh};
 
     for (const auto polyline : polylines) {

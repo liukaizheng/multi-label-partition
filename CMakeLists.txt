@@ -14,11 +14,11 @@ set(CGAL_DO_NOT_WARN_ABOUT_CMAKE_BUILD_TYPE ON)
 find_package(CGAL REQUIRED)
 
 CPMAddPackage("gh:CLIUtils/CLI11#v2.6.1")
-CPMAddPackage("gh:liukaizheng/mesh#main")
-# CPMAddPackage(
-#     NAME mesh
-#     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../mesh
-# )
+# CPMAddPackage("gh:liukaizheng/mesh#main")
+CPMAddPackage(
+    NAME mesh
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../mesh
+)
 CPMAddPackage(
     NAME libigl
     GIT_TAG main

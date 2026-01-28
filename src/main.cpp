@@ -211,6 +211,84 @@ auto extract_color_boundaries(
     );
 }
 
+namespace tet_mesh_boundary {
+struct VertexProp {
+    std::array<double, 3> pt;
+};
+
+struct EdgeProp {
+    double len;
+};
+
+using Mesh = gpf::ManifoldMesh<VertexProp, gpf::Empty, EdgeProp, gpf::Empty>;
+
+auto compress_mesh(
+    const std::vector<std::array<double, 3>>& points,
+    const std::vector<std::array<std::size_t, 3>>& faces,
+    const std::vector<std::size_t>& face_indices
+) {
+    std::vector<std::size_t> point_map(points.size(), gpf::kInvalidIndex);
+    std::vector<std::size_t> mesh_vertices;
+    std::vector<std::array<double, 3>> mesh_faces;
+    for (const auto fid : face_indices) {
+        auto face = faces[fid];
+        for (auto& vid : face) {
+            if (point_map[vid] == gpf::kInvalidIndex) {
+                point_map[vid] = mesh_vertices.size();
+                mesh_vertices.emplace_back(vid);
+            }
+            vid = point_map[vid];
+        }
+    }
+    auto mesh = Mesh::new_in(mesh_faces);
+    const auto a = 2;
+}
+
+auto extract_boundary_from_tets(
+    const std::vector<std::array<double, 3>>& points,
+    const std::vector<std::array<std::size_t, 4>>& tet_indices
+) {
+    auto hash = [](const std::array<std::size_t, 3>& key) {
+        return boost::hash_value(key);
+    };
+    auto hash_key = [](const std::array<std::size_t, 3>& key) {
+        auto ret = key;
+        std::sort(ret.begin(), ret.end());
+        return ret;
+    };
+    std::unordered_map<std::array<std::size_t, 3>, std::size_t, decltype(hash)> face_index_map(tet_indices.size() * 2, std::move(hash));
+    std::vector<std::array<std::size_t, 3>> faces;
+    std::vector<std::array<std::size_t, 2>> face_tets;
+    face_tets.reserve(tet_indices.size() * 2);
+    std::vector<tet_mesh::Tet> tets;
+    for (std::size_t i = 0; i < tet_indices.size(); ++i) {
+        const auto& t = tet_indices[i];
+        std::array<gpf::FaceId, 4> tet_faces;
+        std::size_t idx = 0;
+        for (auto&& face : {
+            std::array<std::size_t, 3>{{t[2], t[1], t[3]}},
+            std::array<std::size_t, 3>{{t[0], t[2], t[3]}},
+            std::array<std::size_t, 3>{{t[1], t[0], t[3]}},
+            std::array<std::size_t, 3>{{t[0], t[1], t[2]}}
+        }) {
+            auto iter = face_index_map.emplace(hash_key(face), faces.size());
+            tet_faces[idx] = gpf::FaceId{iter.first->second};
+            if (iter.second) {
+                faces.emplace_back(std::move(face));
+                face_tets.emplace_back(std::array<std::size_t, 2>{{i, gpf::kInvalidIndex}});
+            } else {
+                face_tets[iter.first->second][1] = i;
+            }
+            idx += 1;
+        }
+        tets.emplace_back(tet_mesh::Tet{.vertices{gpf::VertexId{t[0]}, gpf::VertexId{t[1]}, gpf::VertexId{t[2]}, gpf::VertexId{t[3]}}, .faces{std::move(tet_faces)}});
+    }
+    const auto boundary_faces = ranges::iota_view{0ull, faces.size()} | views::filter([&face_tets](std::size_t i) {
+        return face_tets[i][1] == gpf::kInvalidIndex;
+    }) | ranges::to<std::vector>();
+}
+}
+
 auto read_colored_mesh(const std::string& file_name) {
     std::ifstream input_file(file_name, std::ios::in);
     int n_v, n_f, n_e;
@@ -372,7 +450,8 @@ auto build_triangle_groups(
     return triangle_groups;
 }
 
-auto build_tet_mesh1(
+
+auto build_tet_mesh(
     const std::vector<std::array<double, 3>>& points,
     const std::vector<std::array<std::size_t, 4>>& tet_indices
 ) {
@@ -466,10 +545,11 @@ int main(int argc, char* argv[]) {
     std::vector<std::array<std::size_t, 3>> colors;
     auto [points, faces, label_face_groups] = read_colored_mesh(mesh_path);
 
-    auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
     auto [outline_points, outline_parts] = extract_color_boundaries(points, faces, label_face_groups);
     auto [tet_points, tet_indices] = read_msh(msh_path);
-    auto [tet_mesh, tets] = build_tet_mesh1(tet_points, tet_indices);
+    auto [tet_mesh, tets] = build_tet_mesh(tet_points, tet_indices);
+    tet_mesh_boundary::extract_boundary_from_tets(tet_points, tet_indices);
+    auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
 
     write_msh("123.obj", tet_mesh);
     setup_neg_distance(tet_mesh, triangle_groups);

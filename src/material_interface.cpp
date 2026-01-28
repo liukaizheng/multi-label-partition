@@ -589,6 +589,12 @@ void MaterialInterface::extract(
     const tet_mesh::Tet& tet,
     const std::vector<std::size_t>& material_indices
 ) noexcept {
+    auto face_vertices = mesh.faces() |
+        views::transform([](const auto& face) {
+            return views::transform(face.halfedges(), [](const auto& he) {
+                return he.to().id.idx;
+            });
+        }) | ranges::to<std::vector<std::vector<std::size_t>>>();
     for (const auto face : mesh.faces()) {
         auto& face_props = face.data().property;
         const auto pid = face_props.materials[0];
@@ -775,6 +781,9 @@ void MaterialInterface::extract(
                 material_indices[cells[f_props.cells[1]].material - 4],
                 material_indices[cells[f_props.cells[0]].material - 4]
             }});
+        }
+        if (info.faces.size() == 4574) {
+            const auto a = 2;
         }
     }
 
@@ -1159,7 +1168,9 @@ void do_material_interface(
 
     ExtractInfo info;
     std::array<double, 12> corners;
+    std::size_t tid = 0;
     for (const auto &tet : tets) {
+        tid += 1;
         std::unordered_set<std::size_t> tet_material_set;
         for (const auto vid : tet.vertices) {
             const auto idx = vid.idx;
@@ -1187,9 +1198,10 @@ void do_material_interface(
 
         const auto& tvs = tet.vertices;
         if (ranges::count_if(tvs, [](const auto vid) {
-            return vid.idx == 25124 || vid.idx == 246 || vid.idx == 41718;
+            return vid.idx == 53146 || vid.idx == 32807 || vid.idx == 53190 || vid.idx == 1728;
         }) >= 3) {
             const auto a = 2;
+            save_tet(tid - 1, tets, tet_mesh);
         }
         for (std::size_t i = 0; i < 4; i++) {
             auto p1 = &corners[i * 3];
@@ -1239,7 +1251,7 @@ void do_material_interface(
 
     auto [patches, material_cells] = info.extract_material_cells(n_materials);
     write_material_cells("material", info.points, info.faces, patches, material_cells);
-    // write_mesh("output.obj", info.points, info.faces);
+    write_mesh("output.obj", info.points, info.faces);
     // write_mesh("patch_0.obj", info.points, patches[0] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());
     // write_mesh("patch_1.obj", info.points, patches[1] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());
     // write_mesh("patch_2.obj", info.points, patches[2] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());

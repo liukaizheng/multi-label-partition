@@ -26,6 +26,8 @@
 #include <array>
 #include <boost/functional/hash.hpp>
 
+#include <gpf/manifold_mesh.hpp>
+#include <gpf/mesh.hpp>
 #include <mshio/mshio.h>
 
 #include <CLI/CLI.hpp>
@@ -42,6 +44,7 @@
 #include <print>
 #include <ranges>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
@@ -101,6 +104,111 @@ void write_msh(const std::string& name, const tet_mesh::TetMesh& mesh) {
         }
         std::println(out);
     }
+}
+
+struct ColorRegionBoundaryPart {
+    std::size_t color1;
+    std::size_t color2;
+    std::vector<std::size_t> indices;
+};
+
+auto extract_color_boundaries(
+    const std::vector<std::array<double, 3>>& points,
+    const std::vector<std::vector<std::size_t>>& faces,
+    std::vector<std::vector<gpf::FaceId>> color_face_groups
+)  {
+
+    std::vector<std::size_t> face_color_indices(faces.size());
+    for (std::size_t i = 0; i < color_face_groups.size(); i++) {
+        for (const auto fid : color_face_groups[i]) {
+            face_color_indices[fid.idx] = i;
+        }
+    }
+
+    using Mesh = gpf::ManifoldMesh<gpf::Empty, gpf::Empty, gpf::Empty, gpf::Empty>;
+    auto mesh = Mesh::new_in(faces);
+    auto hash = [](const std::pair<std::size_t, std::size_t>& key) {
+        return boost::hash_value(key);
+    };
+    std::unordered_map<std::pair<std::size_t, std::size_t>, std::vector<gpf::HalfedgeId>, decltype(hash)> boundary_halfedges_map(color_face_groups.size() * 2, std::move(hash));
+    for (auto e : mesh.edges()) {
+        auto he = e.halfedge();
+        auto he_twin = he.twin();
+        auto f1 = he.face().id.idx;
+        auto f2 = he_twin.face().id.idx;
+        auto color_idx1 = face_color_indices[f1];
+        auto color_idx2 = face_color_indices[f2];
+        if (color_idx1 != color_idx2) {
+            if (color_idx1 < color_idx2) {
+                boundary_halfedges_map[std::make_pair(color_idx1, color_idx2)].emplace_back(he.id);
+            } else {
+                boundary_halfedges_map[std::make_pair(color_idx2, color_idx1)].emplace_back(he_twin.id);
+            }
+        }
+    }
+
+    auto sort_halfedges = [&mesh](std::vector<gpf::HalfedgeId>& halfedges) {
+        std::unordered_set<gpf::VertexId> vertex_set(halfedges.size());
+        for (const auto hid : halfedges) {
+            auto he = mesh.halfedge(hid);
+            auto va = he.from();
+            auto vb = he.to();
+            va.data().halfedge = he.id;
+            vertex_set.emplace(vb.id);
+        }
+        gpf::VertexId start_vid{};
+        for (const auto hid : halfedges) {
+            auto vid = mesh.halfedge(hid).from().id;
+            if (!vertex_set.contains(vid)) {
+                start_vid = vid;
+                break;
+            }
+        }
+        if (!start_vid.valid()) {
+            start_vid = mesh.halfedge(halfedges.front()).to().id;
+        }
+        auto curr_v = mesh.vertex(start_vid);
+        for (std::size_t i = 0; i < halfedges.size(); ++i) {
+            auto he = curr_v.halfedge();
+            halfedges[i] = he.id;
+            curr_v = he.to();
+        }
+    };
+
+    std::vector<gpf::VertexId> outline_vertices;
+    std::vector<std::size_t> vertex_map(mesh.n_vertices_capacity(), gpf::kInvalidIndex);
+
+    std::vector<ColorRegionBoundaryPart> boundary_parts;
+    boundary_parts.reserve(boundary_halfedges_map.size());
+    for (auto&& [pair, halfedges] : boundary_halfedges_map) {
+        sort_halfedges(halfedges);
+        for (const auto hid : halfedges) {
+            auto he = mesh.halfedge(hid);
+            for (const auto vid : {he.from().id, he.to().id}) {
+                if (vertex_map[vid.idx] == gpf::kInvalidIndex) {
+                    vertex_map[vid.idx] = outline_vertices.size();
+                    outline_vertices.emplace_back(vid);
+                }
+            }
+        }
+
+        std::vector<std::size_t> boundary_part;
+        boundary_part.reserve(halfedges.size() + 1);
+        boundary_part.push_back(vertex_map[mesh.halfedge(halfedges.front()).from().id.idx]);
+        for (const auto hid : halfedges) {
+            boundary_part.emplace_back(vertex_map[mesh.halfedge(hid).to().id.idx]);
+        }
+        boundary_parts.emplace_back(ColorRegionBoundaryPart{
+            .color1 = pair.first,
+            .color2 = pair.second,
+            .indices = std::move(boundary_part)
+        });
+    }
+
+    return std::make_tuple(
+        outline_vertices | views::transform([&points] (const auto vid) { return points[vid.idx]; }) | ranges::to<std::vector>(),
+        std::move(boundary_parts)
+    );
 }
 
 auto read_colored_mesh(const std::string& file_name) {
@@ -347,6 +455,7 @@ auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<T
 }
 
 int main(int argc, char* argv[]) {
+    Point_3 p{0.0, 1.0, 2.0};
     CLI::App app { "multi-label-partition" };
     std::string mesh_path;
     std::string msh_path;
@@ -356,9 +465,10 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::array<std::size_t, 3>> colors;
     auto [points, faces, label_face_groups] = read_colored_mesh(mesh_path);
+
     auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
-    // auto [tet_points, tet_indices] = tetrahedralize_by_cgal(points, faces);
-    auto[tet_points, tet_indices] = read_msh(msh_path);
+    auto [outline_points, outline_parts] = extract_color_boundaries(points, faces, label_face_groups);
+    auto [tet_points, tet_indices] = read_msh(msh_path);
     auto [tet_mesh, tets] = build_tet_mesh1(tet_points, tet_indices);
 
     write_msh("123.obj", tet_mesh);

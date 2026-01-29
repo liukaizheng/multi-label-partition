@@ -1,6 +1,6 @@
 #include <vector>
 #include <array>
-#include <gpf/surface_mesh.hpp>
+#include <gpf/manifold_mesh.hpp>
 #include <CGAL/AABB_traits_3.h>
 #include <CGAL/AABB_tree.h>
 #include <CGAL/AABB_triangle_primitive_3.h>
@@ -11,7 +11,7 @@ namespace detail {
 template<typename VP, typename HP, typename EP, typename FP>
 void project_points_on_mesh(
     const std::vector<std::array<double, 3>>& points,
-    gpf::SurfaceMesh<VP, HP, EP, FP>& mesh
+    gpf::ManifoldMesh<VP, HP, EP, FP>& mesh
 ) {
     using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
     using Point_3 = Kernel::Point_3;
@@ -29,7 +29,7 @@ template<typename VP, typename HP, typename EP, typename FP>
 auto project_polylines_on_mesh(
     const std::vector<std::array<double, 3>>& points,
     const std::vector<std::vector<std::size_t>>& polylines,
-    gpf::SurfaceMesh<VP, HP, EP, FP>& mesh
+    gpf::ManifoldMesh<VP, HP, EP, FP>& mesh
 ) {
 
 }

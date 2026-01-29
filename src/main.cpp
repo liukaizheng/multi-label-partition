@@ -37,6 +37,7 @@
 
 #include "tet_mesh.hpp"
 #include "material_interface.hpp"
+#include "project_polylines_on_mesh.hpp"
 
 #include <fstream>
 #include <igl/readOBJ.h>
@@ -91,10 +92,27 @@ namespace ranges = std::ranges;
 namespace views = std::views;
 namespace PMP = CGAL::Polygon_mesh_processing;
 
+namespace { // unnamed namespace to prevent external linkage
 void write_msh(const std::string& name, const tet_mesh::TetMesh& mesh) {
     std::ofstream out(name);
     for (const auto v : mesh.vertices()) {
         const auto& pt = v.data().property.pt;
+        std::println(out, "v {} {} {}", pt[0], pt[1], pt[2]);
+    }
+    for (const auto f : mesh.faces()) {
+        std::print(out, "f");
+        for (const auto he : f.halfedges()) {
+            std::print(out, " {}", he.to().id.idx + 1);
+        }
+        std::println(out);
+    }
+}
+
+template<typename Mesh>
+void write_mesh(const std::string& name, const Mesh& mesh) {
+    std::ofstream out(name);
+    for (const auto v : mesh.vertices()) {
+        const auto& pt = v.prop().pt;
         std::println(out, "v {} {} {}", pt[0], pt[1], pt[2]);
     }
     for (const auto f : mesh.faces()) {
@@ -229,7 +247,7 @@ auto compress_mesh(
 ) {
     std::vector<std::size_t> point_map(points.size(), gpf::kInvalidIndex);
     std::vector<std::size_t> mesh_vertices;
-    std::vector<std::array<double, 3>> mesh_faces;
+    std::vector<std::array<std::size_t, 3>> mesh_faces;
     for (const auto fid : face_indices) {
         auto face = faces[fid];
         for (auto& vid : face) {
@@ -239,9 +257,13 @@ auto compress_mesh(
             }
             vid = point_map[vid];
         }
+        mesh_faces.emplace_back(std::move(face));
     }
     auto mesh = Mesh::new_in(mesh_faces);
-    const auto a = 2;
+    for (auto v : mesh.vertices()) {
+        v.prop().pt = points[mesh_vertices[v.id.idx]];
+    }
+    return std::make_tuple(std::move(mesh_vertices), std::move(mesh));
 }
 
 auto extract_boundary_from_tets(
@@ -283,10 +305,31 @@ auto extract_boundary_from_tets(
         }
         tets.emplace_back(tet_mesh::Tet{.vertices{gpf::VertexId{t[0]}, gpf::VertexId{t[1]}, gpf::VertexId{t[2]}, gpf::VertexId{t[3]}}, .faces{std::move(tet_faces)}});
     }
-    const auto boundary_faces = ranges::iota_view{0ull, faces.size()} | views::filter([&face_tets](std::size_t i) {
+    const auto boundary_faces = ranges::iota_view{0ul, faces.size()} | views::filter([&face_tets](std::size_t i) {
         return face_tets[i][1] == gpf::kInvalidIndex;
     }) | ranges::to<std::vector>();
+    auto [boundary_mesh_vertices, boundary_mesh] = compress_mesh(points, faces, boundary_faces);
+    return std::make_tuple(
+        std::move(faces),
+        std::move(face_tets),
+        std::move(tets),
+        std::move(boundary_mesh_vertices),
+        std::move(boundary_faces),
+        std::move(boundary_mesh)
+    );
 }
+
+auto project_outline_parts(
+    const std::vector<std::array<double, 3>>& outline_points,
+    const std::vector<ColorRegionBoundaryPart>& outline_parts,
+    Mesh& mesh
+) {
+    auto polylines = outline_parts | views::transform([] (const auto& part) {
+        return part.indices;
+    }) | ranges::to<std::vector>();
+    project_polylines_on_mesh(outline_points, polylines, mesh);
+}
+
 }
 
 auto read_colored_mesh(const std::string& file_name) {
@@ -532,6 +575,7 @@ auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<T
         }
     }
 }
+}
 
 int main(int argc, char* argv[]) {
     Point_3 p{0.0, 1.0, 2.0};
@@ -547,8 +591,9 @@ int main(int argc, char* argv[]) {
 
     auto [outline_points, outline_parts] = extract_color_boundaries(points, faces, label_face_groups);
     auto [tet_points, tet_indices] = read_msh(msh_path);
+    auto [tet_faces, face_tets, tets_temp, boundary_vertices, boundary_faces, boundary_mesh] = tet_mesh_boundary::extract_boundary_from_tets(tet_points, tet_indices);
+
     auto [tet_mesh, tets] = build_tet_mesh(tet_points, tet_indices);
-    tet_mesh_boundary::extract_boundary_from_tets(tet_points, tet_indices);
     auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
 
     write_msh("123.obj", tet_mesh);

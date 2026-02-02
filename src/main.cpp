@@ -40,7 +40,6 @@
 #include "project_polylines_on_mesh.hpp"
 
 #include <fstream>
-#include <igl/readOBJ.h>
 #include <format>
 #include <print>
 #include <ranges>
@@ -320,14 +319,17 @@ auto extract_boundary_from_tets(
 }
 
 auto project_outline_parts(
-    const std::vector<std::array<double, 3>>& outline_points,
+    std::vector<std::array<double, 3>>& outline_points,
     const std::vector<ColorRegionBoundaryPart>& outline_parts,
     Mesh& mesh
 ) {
-    auto polylines = outline_parts | views::transform([] (const auto& part) {
-        return part.indices;
-    }) | ranges::to<std::vector>();
-    project_polylines_on_mesh(outline_points, polylines, mesh);
+    project_polylines_on_mesh(
+        outline_points,
+        outline_parts | views::transform([] (const auto& part) {
+            return part.indices;
+        }) | ranges::to<std::vector>(),
+        mesh
+    );
 }
 
 }
@@ -592,6 +594,8 @@ int main(int argc, char* argv[]) {
     auto [outline_points, outline_parts] = extract_color_boundaries(points, faces, label_face_groups);
     auto [tet_points, tet_indices] = read_msh(msh_path);
     auto [tet_faces, face_tets, tets_temp, boundary_vertices, boundary_faces, boundary_mesh] = tet_mesh_boundary::extract_boundary_from_tets(tet_points, tet_indices);
+    project_outline_parts(outline_points, outline_parts, boundary_mesh);
+    write_mesh("fine.obj", boundary_mesh);
 
     auto [tet_mesh, tets] = build_tet_mesh(tet_points, tet_indices);
     auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);

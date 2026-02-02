@@ -19,17 +19,13 @@ CPMAddPackage(
     NAME mesh
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../mesh
 )
-CPMAddPackage(
-    NAME libigl
-    GIT_TAG main
-    GITHUB_REPOSITORY liukaizheng/libigl
-)
 
 # CPMAddPackage(
 #     NAME predicates
 #     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../predicates
 # )
 CPMAddPackage("gh:liukaizheng/predicates#main")
+CPMAddPackage("gh:liukaizheng/triangulation#main")
 
 CPMAddPackage("gh:qnzhou/MshIO#main")
 
@@ -44,7 +40,7 @@ target_link_libraries(multi-label-partition PRIVATE
     CLI11::CLI11
     Eigen3::Eigen
     gpf::mesh
-    igl::core
+    gpf::triangulation
     predicates
     mshio::mshio
 )

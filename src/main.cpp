@@ -590,9 +590,9 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::array<std::size_t, 3>> colors;
     auto [points, faces, label_face_groups] = read_colored_mesh(mesh_path);
+    auto [tet_points, tet_indices] = read_msh(msh_path);
 
     auto [outline_points, outline_parts] = extract_color_boundaries(points, faces, label_face_groups);
-    auto [tet_points, tet_indices] = read_msh(msh_path);
     auto [tet_faces, face_tets, tets_temp, boundary_vertices, boundary_faces, boundary_mesh] = tet_mesh_boundary::extract_boundary_from_tets(tet_points, tet_indices);
     project_outline_parts(outline_points, outline_parts, boundary_mesh);
     write_mesh("fine.obj", boundary_mesh);
@@ -600,7 +600,7 @@ int main(int argc, char* argv[]) {
     auto [tet_mesh, tets] = build_tet_mesh(tet_points, tet_indices);
     auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
 
-    write_msh("123.obj", tet_mesh);
+    // write_msh("123.obj", tet_mesh);
     setup_neg_distance(tet_mesh, triangle_groups);
     do_material_interface(tets, tet_mesh);
     return 0;

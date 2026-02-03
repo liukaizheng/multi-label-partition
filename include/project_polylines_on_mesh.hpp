@@ -1,4 +1,5 @@
-#include "gpf/ids.hpp"
+#include "gpf/manifold_mesh.hpp"
+#include "gpf/property.hpp"
 #include <unordered_map>
 #include <vector>
 #include <array>
@@ -308,6 +309,21 @@ void project_points_on_mesh(
         triangulate_on_face(mesh, fid, points, info.ccs, info.point_indices, point_vertices);
     }
 }
+
+struct VertexProp {
+    double angle_sum;
+};
+
+struct EdgeProp {
+    double len;
+};
+
+struct HalfedgeProp {
+    double angle;
+};
+
+using AuxiliaryMesh = gpf::ManifoldMesh<VertexProp, HalfedgeProp, EdgeProp, gpf::Empty>;
+
 }
 
 template<typename VP, typename HP, typename EP, typename FP>
@@ -317,4 +333,7 @@ auto project_polylines_on_mesh(
     gpf::ManifoldMesh<VP, HP, EP, FP>& mesh
 ) {
     detail::project_points_on_mesh(points, mesh);
+    detail::AuxiliaryMesh aux_mesh;
+    aux_mesh.copy_from(mesh);
+    const auto a = 2;
 }

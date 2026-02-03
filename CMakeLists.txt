@@ -49,6 +49,7 @@ target_include_directories(multi-label-partition PRIVATE
 )
 
 target_compile_options(multi-label-partition PRIVATE
+    -Wall -Wextra -Wpedantic
     -fsanitize=address -fno-omit-frame-pointer
 )
 

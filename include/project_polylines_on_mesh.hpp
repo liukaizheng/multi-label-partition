@@ -1,6 +1,11 @@
+#include "gpf/ids.hpp"
 #include "gpf/manifold_mesh.hpp"
 #include "gpf/property.hpp"
+#include <limits>
+#include <queue>
+#include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <array>
 #include <span>
@@ -244,7 +249,7 @@ void triangulate_on_face(
 }
 
 template<typename VP, typename HP, typename EP, typename FP>
-void project_points_on_mesh(
+auto project_points_on_mesh(
     std::vector<std::array<double, 3>>& points,
     gpf::ManifoldMesh<VP, HP, EP, FP>& mesh
 ) {
@@ -292,6 +297,7 @@ void project_points_on_mesh(
         info.ccs = identify_points(mesh, fid, points, edge_to_points_map, info.point_indices, point_vertices, EPS);
     }
 
+    // add ccs for all triangles sharing this edge to prepare triangulation
     for (const auto eid : edge_to_points_map | views::keys) {
         for (const auto he : mesh.edge(eid).halfedges()) {
             const auto fid = he.face().id;
@@ -308,32 +314,194 @@ void project_points_on_mesh(
     for (const auto& [fid, info] : face_info_map) {
         triangulate_on_face(mesh, fid, points, info.ccs, info.point_indices, point_vertices);
     }
+    return point_vertices;
 }
 
 struct VertexProp {
-    double angle_sum;
+    double angle_sum = 0.0;
 };
 
 struct EdgeProp {
-    double len;
+    double len = 0.0;
+    bool locked = false;
+    bool is_origin = true;
 };
 
 struct HalfedgeProp {
-    double angle;
+    std::array<double, 2> vector;
+    double angle = 0.0;
+    double signpost_angle = 0.0;
+    gpf::HalfedgeId path_prev{};
+    gpf::HalfedgeId path_next{};
 };
 
 using AuxiliaryMesh = gpf::ManifoldMesh<VertexProp, HalfedgeProp, EdgeProp, gpf::Empty>;
 
+inline std::vector<gpf::HalfedgeId> shortest_patch_by_dijksta(const AuxiliaryMesh& mesh, const gpf::VertexId start_vid, const gpf::VertexId end_vid) {
+    for (const auto he :  mesh.vertex(start_vid).outgoing_halfedges()) {
+        if (he.to().id == end_vid && !he.edge().prop().locked) {
+            return {he.id};
+        }
+    }
+
+    using WeightedHalfedge = std::pair<double, gpf::HalfedgeId>;
+    std::unordered_map<gpf::VertexId, gpf::HalfedgeId> incomindg_halfedges_map;
+    std::priority_queue<WeightedHalfedge, std::vector<WeightedHalfedge>, std::greater<WeightedHalfedge>> pq;
+    auto vertex_used = [start_vid, &incomindg_halfedges_map](const gpf::VertexId vid) {
+        return vid == start_vid || incomindg_halfedges_map.find(vid) != incomindg_halfedges_map.end();
+    };
+
+    auto enqueue_vertex_neighbors = [&mesh, &vertex_used, &pq](const gpf::VertexId vid, double dist) {
+        for (const auto he : mesh.vertex(vid).outgoing_halfedges()) {
+            if (he.edge().prop().locked) {
+                continue;
+            }
+            auto vb = he.to().id;
+            if (!vertex_used(vb)) {
+                auto len = he.edge().prop().len;
+                pq.emplace(dist + len, he.id);
+            }
+        }
+    };
+
+    enqueue_vertex_neighbors(start_vid, 0.0);
+    while(!pq.empty()) {
+        auto [curr_dist, hid] = pq.top();
+        pq.pop();
+        auto vid = mesh.he_to(hid);
+        if (vertex_used(vid)) {
+            continue;
+        }
+        if (vid == end_vid) {
+            std::vector<gpf::HalfedgeId> path;
+            do {
+                path.emplace_back(hid);
+                auto vid = mesh.he_from(hid);
+                if (vid == start_vid) {
+                    break;
+                }
+                assert(incomindg_halfedges_map.find(vid) != incomindg_halfedges_map.end());
+                hid = incomindg_halfedges_map[vid];
+            } while(true);
+            ranges::reverse(path);
+            return path;
+        }
+        incomindg_halfedges_map.emplace(vid, hid);
+        enqueue_vertex_neighbors(vid, curr_dist);
+    }
+    return {};
 }
 
-template<typename VP, typename HP, typename EP, typename FP>
+
+struct FlipGeodesic {
+    enum class TurnDirection {
+        Left,
+        Right
+    };
+    struct Wedge {
+        double angle;
+        gpf::VertexId va;
+        gpf::VertexId vc;
+        gpf::HalfedgeId hid;
+        TurnDirection dir;
+
+        auto operator<=>(const Wedge& other) const noexcept {
+            return angle <=> other.angle;
+        }
+        bool operator==(const Wedge& other) const noexcept = default;
+    };
+
+    std::vector<gpf::HalfedgeId> perform(std::vector<gpf::HalfedgeId>&& raw_path);
+
+    void init_wedge_queue(const std::vector<gpf::HalfedgeId>& raw_path);
+    void add_wedge(const gpf::HalfedgeId ha, const gpf::HalfedgeId hb);
+
+    AuxiliaryMesh* mesh;
+    std::priority_queue<Wedge, std::vector<Wedge>, std::greater<Wedge>> pq;
+};
+
+inline std::vector<gpf::HalfedgeId> FlipGeodesic::perform(std::vector<gpf::HalfedgeId>&& raw_path) {
+    if (raw_path.size() == 1) {
+        assert(!mesh->halfedge(raw_path.back()).edge().prop().locked);
+        assert(mesh->halfedge(raw_path.back()).edge().prop().is_origin);
+        return raw_path;
+    }
+    init_wedge_queue(raw_path);
+    while(!pq.empty()) {
+        pq.pop();
+    }
+    return {};
+}
+
+inline void FlipGeodesic::init_wedge_queue(const std::vector<gpf::HalfedgeId>& raw_path) {
+    for (std::size_t i = 0; i + 1 < raw_path.size(); i++) {
+        auto h1 = raw_path[i];
+        auto h2 = raw_path[i + 1];
+        add_wedge(h1, h2);
+    }
+}
+
+inline void FlipGeodesic::add_wedge(const gpf::HalfedgeId h1, const gpf::HalfedgeId h2) {
+    auto ha = mesh->halfedge(h1);
+    auto hb = mesh->halfedge(h2);
+    auto vb = ha.to();
+    auto angle_sum = vb.prop().angle_sum;
+    auto angle_in = ha.twin().prop().signpost_angle;
+    auto angle_out = hb.prop().signpost_angle;
+    auto is_boundary = mesh->v_is_boundary(vb.id);
+    double right_angle = std::numeric_limits<double>::infinity();
+    double left_angle = std::numeric_limits<double>::infinity();
+    if (angle_in < angle_out) {
+        right_angle = angle_out - angle_in;
+    } else if (!is_boundary) {
+        right_angle = angle_sum - angle_in + angle_out;
+    }
+
+    if (angle_out < angle_in) {
+        left_angle = angle_in - angle_out;
+    } else if (!is_boundary) {
+        left_angle = angle_sum - angle_out + angle_in;
+    }
+
+    auto va = ha.from().id;
+    auto vc = hb.to().id;
+    constexpr double EPS_ANGLE = 1e-5;
+    if (left_angle < std::numbers::pi - EPS_ANGLE) {
+        pq.push(Wedge{.angle = left_angle, .va = va, .vc = vc, .hid = h1, .dir = TurnDirection::Left});
+    }
+    if (right_angle < std::numbers::pi - EPS_ANGLE) {
+        pq.push(Wedge{.angle = right_angle, .va = vc, .vc = va, .hid = h2, .dir = TurnDirection::Right});
+    }
+}
+}
+
+template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
 auto project_polylines_on_mesh(
     std::vector<std::array<double, 3>>& points,
     const std::vector<std::vector<std::size_t>>& polylines,
     gpf::ManifoldMesh<VP, HP, EP, FP>& mesh
 ) {
-    detail::project_points_on_mesh(points, mesh);
+    auto point_vertices = detail::project_points_on_mesh(points, mesh);
     detail::AuxiliaryMesh aux_mesh;
     aux_mesh.copy_from(mesh);
+    gpf::update_edge_lengths<N>(aux_mesh, [mesh](auto v) {
+        return std::span<const double, N>{mesh.vertex_prop(v.id).pt};
+    });
+    gpf::update_corner_angles(aux_mesh);
+    gpf::update_vertex_angle_sums(aux_mesh);
+    gpf::update_halfedge_signpost_angles(aux_mesh);
+    gpf::update_halfedge_vectors(aux_mesh);
+    detail::FlipGeodesic flip_geodesic{.mesh = &aux_mesh};
+
+    for (const auto polyline : polylines) {
+        std::vector<gpf::HalfedgeId> polyline_path;
+        for (std::size_t i = 0; i + 1 < polyline.size(); i++) {
+            auto va = point_vertices[polyline[i]];
+            auto vb = point_vertices[polyline[i + 1]];
+            polyline_path.append_range(
+                flip_geodesic.perform(detail::shortest_patch_by_dijksta(aux_mesh, va, vb)));
+            const auto a = 2;
+        }
+    }
     const auto a = 2;
 }

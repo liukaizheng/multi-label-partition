@@ -323,7 +323,7 @@ auto project_outline_parts(
     const std::vector<ColorRegionBoundaryPart>& outline_parts,
     Mesh& mesh
 ) {
-    project_polylines_on_mesh(
+    project_polylines_on_mesh<3>(
         outline_points,
         outline_parts | views::transform([] (const auto& part) {
             return part.indices;

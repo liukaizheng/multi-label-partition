@@ -1,15 +1,20 @@
 #include "gpf/ids.hpp"
-#include "gpf/manifold_mesh.hpp"
 #include "gpf/property.hpp"
+#include <algorithm>
+#include <cmath>
+#include <functional>
 #include <limits>
 #include <queue>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 #include <array>
 #include <span>
 #include <ranges>
+
+#include <Eigen/Geometry>
 
 #include <gpf/mesh.hpp>
 #include <gpf/triangulation.hpp>
@@ -400,8 +405,7 @@ struct FlipGeodesic {
     };
     struct Wedge {
         double angle;
-        gpf::VertexId va;
-        gpf::VertexId vc;
+        std::array<gpf::VertexId, 3> vertices;
         gpf::HalfedgeId hid;
         TurnDirection dir;
 
@@ -415,9 +419,15 @@ struct FlipGeodesic {
 
     void init_wedge_queue(const std::vector<gpf::HalfedgeId>& raw_path);
     void add_wedge(const gpf::HalfedgeId ha, const gpf::HalfedgeId hb);
+    void shorten_locally();
+    bool flip(const gpf::HalfedgeId hid) const;
+    void replace_path(std::vector<gpf::HalfedgeId>&& new_path, const gpf::HalfedgeId path_prev_prev_hid, const gpf::HalfedgeId path_next_next_hid);
 
     AuxiliaryMesh* mesh;
-    std::priority_queue<Wedge, std::vector<Wedge>, std::greater<Wedge>> pq;
+    std::priority_queue<Wedge, std::vector<Wedge>, std::greater<Wedge>> pq{};
+    gpf::VertexId path_start_vid{};
+    gpf::VertexId path_end_vid{};
+    gpf::HalfedgeId path_start_hid{};
 };
 
 inline std::vector<gpf::HalfedgeId> FlipGeodesic::perform(std::vector<gpf::HalfedgeId>&& raw_path) {
@@ -428,15 +438,34 @@ inline std::vector<gpf::HalfedgeId> FlipGeodesic::perform(std::vector<gpf::Halfe
     }
     init_wedge_queue(raw_path);
     while(!pq.empty()) {
-        pq.pop();
+        shorten_locally();
     }
-    return {};
+    std::vector<gpf::HalfedgeId> result;
+    result.reserve(raw_path.size());
+    auto curr_hid = path_start_hid;
+    while (true) {
+        result.emplace_back(curr_hid);
+        mesh->halfedge(curr_hid).edge().prop().locked = true;
+        if (mesh->he_to(curr_hid) == path_end_vid) {
+            break;
+        }
+
+        curr_hid = mesh->halfedge_prop(curr_hid).path_next;
+        assert(curr_hid.valid());
+    }
+    return result;
 }
 
+
 inline void FlipGeodesic::init_wedge_queue(const std::vector<gpf::HalfedgeId>& raw_path) {
+    path_start_vid = mesh->he_from(raw_path.front());
+    path_start_hid = raw_path.front();
+    path_end_vid = mesh->he_to(raw_path.back());
     for (std::size_t i = 0; i + 1 < raw_path.size(); i++) {
         auto h1 = raw_path[i];
         auto h2 = raw_path[i + 1];
+        mesh->halfedge_prop(h1).path_next = h2;
+        mesh->halfedge_prop(h2).path_prev = h1;
         add_wedge(h1, h2);
     }
 }
@@ -467,14 +496,175 @@ inline void FlipGeodesic::add_wedge(const gpf::HalfedgeId h1, const gpf::Halfedg
     auto vc = hb.to().id;
     constexpr double EPS_ANGLE = 1e-5;
     if (left_angle < std::numbers::pi - EPS_ANGLE) {
-        pq.push(Wedge{.angle = left_angle, .va = va, .vc = vc, .hid = h1, .dir = TurnDirection::Left});
+        pq.push(Wedge{.angle = left_angle, .vertices{va, vb.id, vc}, .hid = h1, .dir = TurnDirection::Left});
     }
     if (right_angle < std::numbers::pi - EPS_ANGLE) {
-        pq.push(Wedge{.angle = right_angle, .va = vc, .vc = va, .hid = h2, .dir = TurnDirection::Right});
+        pq.push(Wedge{.angle = right_angle, .vertices{va, vb.id, vc}, .hid = h1, .dir = TurnDirection::Right});
     }
 }
+
+inline void FlipGeodesic::shorten_locally() {
+    auto [angle, vertices, path_prev_hid, dir] = pq.top();
+    auto path_next_hid = mesh->halfedge_prop(path_prev_hid).path_next;
+    pq.pop();
+    if (
+        !path_next_hid.valid() ||
+        mesh->he_from(path_prev_hid) != vertices[0] ||
+        mesh->he_to(path_prev_hid) != vertices[1] ||
+        mesh->he_to(path_next_hid) != vertices[2]
+    ) {
+        return;
+    }
+
+    const auto path_prev_prev_hid = mesh->halfedge_prop(path_prev_hid).path_prev;
+    const auto path_next_next_hid = mesh->halfedge_prop(path_next_hid).path_next;
+
+    auto [prev_hid, next_hid] = dir == TurnDirection::Left ? std::pair{path_prev_hid, path_next_hid} : std::pair{mesh->he_twin(path_next_hid), mesh->he_twin(path_prev_hid)};
+    auto curr_he = mesh->halfedge(prev_hid).next();
+    while(curr_he.id != next_hid) {
+        if (curr_he.twin().id == prev_hid) {
+            curr_he = curr_he.twin().next();
+            continue;
+        }
+        if (flip(curr_he.id)) {
+            curr_he = curr_he.next().twin();
+        } else {
+            curr_he = curr_he.twin().next();
+        }
+    }
+
+    std::vector<gpf::HalfedgeId> new_path;
+    curr_he = mesh->halfedge(prev_hid).next();
+    while (true) {
+        new_path.emplace_back(curr_he.next().twin().id);
+        if (curr_he.id == next_hid) {
+            break;
+        }
+        curr_he = curr_he.twin().next();
+    }
+    if (dir == TurnDirection::Right) {
+        ranges::reverse(new_path);
+        for (auto& hid : new_path) {
+            hid = mesh->he_twin(hid);
+        }
+    }
+    replace_path(std::move(new_path), path_prev_prev_hid, path_next_next_hid);
 }
 
+inline bool FlipGeodesic::flip(const gpf::HalfedgeId hid) const {
+    if (mesh->halfedge(hid).edge().prop().locked) {
+        return false;
+    }
+
+    auto hac = hid;
+    auto hca = mesh->he_twin(hac);
+    auto hcd = mesh->he_next(hac);
+    auto hda = mesh->he_next(hcd);
+    auto hab = mesh->he_next(hca);
+    auto hbc = mesh->he_next(hab);
+
+    auto lab = mesh->halfedge(hab).edge().prop().len;
+    auto lbc = mesh->halfedge(hbc).edge().prop().len;
+    auto lcd = mesh->halfedge(hcd).edge().prop().len;
+    auto lda = mesh->halfedge(hda).edge().prop().len;
+    auto lca = mesh->halfedge(hca).edge().prop().len;
+
+    auto oppo_point = [](
+        const double* pa,
+        const double lab,
+        const double lbc,
+        const double lca,
+        bool reversed
+    ) {
+        const auto h = gpf::triangle_area(lab, lbc, lca) / lab * 2.0;
+        const auto w = (lca * lca + lab * lab - lbc * lbc) / (2.0 * lab);
+        if (reversed) {
+            return Eigen::Vector2d{pa[0] - w, -h};
+        } else {
+            return Eigen::Vector2d{pa[0] + w, h};
+        }
+    };
+
+    Eigen::Vector2d pc {0.0, 0.0};
+    Eigen::Vector2d pa {lca, 0.0};
+    auto pb = oppo_point(pc.data(), lca, lab, lbc, false);
+    auto pd = oppo_point(pa.data(), lca, lcd, lda, true);
+
+    auto left_area = (pd - pc).cross(pb - pc);
+    auto right_area = (pb - pa).cross(pd - pa);
+    constexpr double TRIANGLE_TEST_EPS = 1e-6;
+    auto area_sum = left_area + right_area;
+    if(left_area / area_sum < TRIANGLE_TEST_EPS || right_area / area_sum < TRIANGLE_TEST_EPS) {
+        return false;
+    }
+
+    mesh->flip(hid);
+    auto he_ab = mesh->halfedge(hab);
+    auto he_bc = mesh->halfedge(hbc);
+    auto he_cd = mesh->halfedge(hcd);
+    auto he_da = mesh->halfedge(hda);
+    auto he_bd = mesh->halfedge(hid);
+    auto he_db = he_bd.twin();
+    assert(he_bd.next().id == he_da.id);
+
+    he_bd.edge().prop().len = (pd - pb).norm();
+    gpf::update_corner_angles_on_face(he_bd.face());
+    gpf::update_corner_angles_on_face(he_db.face());
+
+    // edge bd counld't be boundary
+    he_bd.prop().signpost_angle = he_bc.prop().signpost_angle + he_bc.prop().angle;
+    gpf::update_halfedge_vector(he_bd);
+    he_db.prop().signpost_angle = he_da.prop().signpost_angle + he_da.prop().angle;
+    gpf::update_halfedge_vector(he_db);
+
+    // auto _a1 = std::fmod(he_ab.twin().prop().signpost_angle - he_bd.prop().angle, he_bd.from().prop().angle_sum);
+    // auto _a2 = he_bd.prop().signpost_angle - _a1;
+    assert(std::abs(he_db.prop().signpost_angle - std::fmod(he_cd.twin().prop().signpost_angle - he_db.prop().angle + he_db.from().prop().angle_sum, he_db.from().prop().angle_sum)) < 1e-8);
+    assert(std::abs(he_bd.prop().signpost_angle - std::fmod(he_ab.twin().prop().signpost_angle - he_bd.prop().angle + he_bd.from().prop().angle_sum, he_bd.from().prop().angle_sum)) < 1e-8);
+    assert(std::abs(ranges::fold_left( he_bd.from().outgoing_halfedges() | views::transform([](auto he) { return he.prop().angle; }), 0.0, std::plus{}) - he_bd.from().prop().angle_sum) < 1e-8);
+    assert(std::abs(ranges::fold_left( he_db.from().outgoing_halfedges() | views::transform([](auto he) { return he.prop().angle; }), 0.0, std::plus{}) - he_db.from().prop().angle_sum) < 1e-8);
+    return true;
+}
+
+inline void FlipGeodesic::replace_path(std::vector<gpf::HalfedgeId>&& new_path, const gpf::HalfedgeId path_prev_prev_hid, const gpf::HalfedgeId path_next_next_hid) {
+    auto prev_he = mesh->halfedge(path_prev_prev_hid);
+    auto curr_he = mesh->halfedge(new_path.front());
+    curr_he.prop().path_prev = prev_he.id;
+    if (prev_he.id.valid()) {
+        prev_he.prop().path_next = curr_he.id;
+        add_wedge(prev_he.id, curr_he.id);
+    } else if (mesh->he_from(curr_he.id) == path_start_vid) {
+        path_start_hid = curr_he.id;
+    }
+
+    for (std::size_t i = 1; i < new_path.size(); ++i) {
+        prev_he = curr_he;
+        curr_he = mesh->halfedge(new_path[i]);
+        curr_he.prop().path_prev = prev_he.id;
+        prev_he.prop().path_next = curr_he.id;
+        add_wedge(prev_he.id, curr_he.id);
+    }
+    curr_he.prop().path_next = path_next_next_hid;
+    if (path_next_next_hid.valid()) {
+        mesh->halfedge_prop(path_next_next_hid).path_prev = curr_he.id;
+        add_wedge(curr_he.id, path_next_next_hid);
+    }
+}
+
+template<std::size_t N>
+struct TracePolyline {
+    struct EdgePoint {
+        gpf::HalfedgeId hid;
+        double t;
+    };
+
+    using Anchor = std::variant<gpf::VertexId, EdgePoint>;
+
+    void trace_from_vertex(gpf::VertexId start_vid, const double* dir);
+    std::vector<Anchor> path;
+};
+
+}
 template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
 auto project_polylines_on_mesh(
     std::vector<std::array<double, 3>>& points,
@@ -500,8 +690,8 @@ auto project_polylines_on_mesh(
             auto vb = point_vertices[polyline[i + 1]];
             polyline_path.append_range(
                 flip_geodesic.perform(detail::shortest_patch_by_dijksta(aux_mesh, va, vb)));
-            const auto a = 2;
         }
+        const auto a = 2;
     }
     const auto a = 2;
 }

@@ -30,6 +30,15 @@ namespace detail {
 namespace views = std::views;
 namespace ranges = std::ranges;
 using Vector2d = Eigen::Vector2d;
+
+// Complex division: treat 2D vectors as complex numbers (x + yi)
+inline Vector2d complex_div(const Vector2d& a, const Vector2d& b) {
+    double denom = b.squaredNorm();
+    return Vector2d{
+        (a.x() * b.x() + a.y() * b.y()) / denom,
+        (a.y() * b.x() - a.x() * b.y()) / denom
+    };
+}
 using Vector3d = Eigen::Vector3d;
 
 inline std::vector<double> compute_bary_coordinates(const std::span<const double> points) {
@@ -666,7 +675,7 @@ struct TracePolyline {
     std::span<const double> origin_signpost_angles;
     std::span<const double> origin_edge_lengths;
     std::vector<Anchor> path;
-    const std::vector<EdgePoint>& edge_points;
+    std::vector<EdgePoint>& edge_points;
     Mesh* mesh;
     AuxiliaryMesh* aux_mesh;
 };
@@ -770,7 +779,7 @@ void TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* 
         return;
     }
 
-    auto trace_next = [this, dir_data, end_vid](const auto& mid_pt, const auto& pa, const auto& pb, const auto& pc, const auto& pd) {
+    auto trace_next = [this, dir_data, end_vid, &he_bc](const auto& mid_pt, const auto& pa, const auto& pb, const auto& pc, const auto& pd) {
         auto vc_ori = predicates::orient2d(mid_pt.data(), pd.data(), pc.data());
         if (vc_ori > 0.0) {
             auto right_ori = predicates::orient2d(mid_pt.data(), pb.data(), pd.data());
@@ -780,7 +789,8 @@ void TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* 
                 trace_from_edge(he_bc.twin().id, dir_data, end_vid);
             } else {
                 auto dir = Vector2d::Map(dir_data);
-                Vector2d new_dir = (dir / (pb - pc)).normalized();
+                Vector2d new_dir = complex_div(dir, pb - pc).normalized();
+                trace_from_edge(he_bc.twin().id, new_dir.data(), end_vid);
             }
         } else {
             auto right_ori = -vc_ori;
@@ -791,10 +801,11 @@ void TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* 
             if constexpr (N == 2) {
                 trace_from_edge(he_ca.twin().id, dir_data, end_vid);
             } else {
-
+                auto dir = Vector2d::Map(dir_data);
+                Vector2d new_dir = complex_div(dir, pc - pa).normalized();
+                trace_from_edge(he_bc.twin().id, new_dir.data(), end_vid);
             }
         }
-
     };
 
     if constexpr (N == 2) {
@@ -803,6 +814,7 @@ void TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* 
         auto pb = Vec::Map(he_ab.to().prop().pt.data());
         auto pc = Vec::Map(he_bc.to().prop().pt.data());
         auto pd = Vec::Map(mesh->vertex(end_vid).prop().pt.data());
+        trace_next(mid_pt, pa, pb, pc, pd);
     } else {
         auto he_bc = he_ab.next();
         auto he_ca = he_bc.next();
@@ -820,21 +832,7 @@ void TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* 
         Vector2d mid_pt{ pa * (1.0 - t) + pb * t };
         auto dir = Vector2d::Map(dir_data);
         Vector2d pd = mid_pt + dir;
-        auto vc_ori = predicates::orient2d(mid_pt.data(), pd.data(), pc.data());
-        if (vc_ori > 0.0) {
-            auto right_ori = predicates::orient2d(mid_pt.data(), pb.data(), pd.data());
-            assert(right_ori > 0.0);
-            add_intersection_point(vc_ori, right_ori, he_bc.id);
-            Eigen::Vector2d new_dir = (pb - pc);
-            trace_from_edge(he_bc.twin().id, dir_data, end_vid);
-        } else {
-            auto right_ori = -vc_ori;
-            auto left_ori = predicates::orient2d(mid_pt.data(), pd.data(), pa.data());
-            assert(left_ori > 0.0);
-            auto he_ca = he_bc.next();
-            add_intersection_point(left_ori, right_ori, he_bc.next().id);
-            trace_from_edge(he_ca.twin().id, dir_data, end_vid);
-        }
+        trace_next(mid_pt, pa, pb, pc, pd);
     }
 }
 

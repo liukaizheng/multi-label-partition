@@ -580,7 +580,6 @@ auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<T
 }
 
 int main(int argc, char* argv[]) {
-    Point_3 p{0.0, 1.0, 2.0};
     CLI::App app { "multi-label-partition" };
     std::string mesh_path;
     std::string msh_path;

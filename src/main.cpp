@@ -10,17 +10,6 @@
 #include <CGAL/Polygon_mesh_processing/repair_polygon_soup.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include <CGAL/Surface_mesh.h>
-#include <CGAL/Triangulation_face_base_with_info_2.h>
-#include <CGAL/Triangulation_vertex_base_with_info_2.h>
-#include <CGAL/boost/graph/Euler_operations.h>
-#include <CGAL/boost/graph/helpers.h>
-#include <CGAL/Polyhedral_mesh_domain_with_features_3.h>
-#include <CGAL/Polyhedron_3.h>
-#include <CGAL/boost/graph/copy_face_graph.h>
-#include <CGAL/Mesh_triangulation_3.h>
-#include <CGAL/Mesh_complex_3_in_triangulation_3.h>
-#include <CGAL/Mesh_criteria_3.h>
-#include <CGAL/make_mesh_3.h>
 
 #include <algorithm>
 #include <array>
@@ -42,6 +31,7 @@
 #include <fstream>
 #include <format>
 #include <print>
+#include <queue>
 #include <ranges>
 #include <unordered_map>
 #include <unordered_set>
@@ -56,24 +46,12 @@ using VI = Mesh::Vertex_index;
 using HI = Mesh::Halfedge_index;
 using EI = Mesh::Edge_index;
 using FI = Mesh::Face_index;
-using Vb = CGAL::Triangulation_vertex_base_with_info_2<VI, Kernel>;
-using Fb_info = CGAL::Triangulation_face_base_with_info_2<bool, Kernel>;
-using Fb = CGAL::Constrained_triangulation_face_base_2<Kernel, Fb_info>;
-using Tds = CGAL::Triangulation_data_structure_2<Vb, Fb>;
-using CDT = CGAL::Constrained_Delaunay_triangulation_2<Kernel, Tds>;
-using Mesh_domain = CGAL::Polyhedral_mesh_domain_with_features_3<Kernel>;
-using Polyhedron = Mesh_domain::Polyhedron;
 
 using Triangle = Kernel::Triangle_3;
 using Iterator = std::vector<Triangle>::const_iterator;
 using Primitive = CGAL::AABB_triangle_primitive_3<Kernel, Iterator>;
 using AABB_triangle_traits = CGAL::AABB_traits_3<Kernel, Primitive>;
 using Tree = CGAL::AABB_tree<AABB_triangle_traits>;
-
-using Tr = CGAL::Mesh_triangulation_3<Mesh_domain>::type;
-using C3t3 = CGAL::Mesh_complex_3_in_triangulation_3<Tr>;
-using Mesh_criteria = CGAL::Mesh_criteria_3<Tr>;
-
 
 using VMat = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
 using VMat2 = Eigen::Matrix<double, Eigen::Dynamic, 2>;
@@ -89,7 +67,6 @@ using RowSpMat = Eigen::SparseMatrix<double, Eigen::RowMajor>;
 
 namespace ranges = std::ranges;
 namespace views = std::views;
-namespace PMP = CGAL::Polygon_mesh_processing;
 
 namespace { // unnamed namespace to prevent external linkage
 void write_msh(const std::string& name, const tet_mesh::TetMesh& mesh) {
@@ -116,6 +93,23 @@ void write_mesh(const std::string& name, const Mesh& mesh) {
     }
     for (const auto f : mesh.faces()) {
         std::print(out, "f");
+        for (const auto he : f.halfedges()) {
+            std::print(out, " {}", he.to().id.idx + 1);
+        }
+        std::println(out);
+    }
+}
+
+template<typename Mesh>
+void write_faces(const std::string& name, const Mesh& mesh, const std::span<const gpf::FaceId> faces) {
+    std::ofstream out(name);
+    for (const auto v : mesh.vertices()) {
+        const auto& pt = v.prop().pt;
+        std::println(out, "v {} {} {}", pt[0], pt[1], pt[2]);
+    }
+    for (const auto fid : faces) {
+        std::print(out, "f");
+        auto f = mesh.face(fid);
         for (const auto he : f.halfedges()) {
             std::print(out, " {}", he.to().id.idx + 1);
         }
@@ -233,11 +227,11 @@ struct VertexProp {
     std::array<double, 3> pt;
 };
 
-struct EdgeProp {
-    double len;
+struct FaceProp {
+    std::size_t color_index = gpf::kInvalidIndex;
 };
 
-using Mesh = gpf::ManifoldMesh<VertexProp, gpf::Empty, EdgeProp, gpf::Empty>;
+using Mesh = gpf::ManifoldMesh<VertexProp, gpf::Empty, gpf::Empty, FaceProp>;
 
 auto compress_mesh(
     const std::vector<std::array<double, 3>>& points,
@@ -281,10 +275,8 @@ auto extract_boundary_from_tets(
     std::vector<std::array<std::size_t, 3>> faces;
     std::vector<std::array<std::size_t, 2>> face_tets;
     face_tets.reserve(tet_indices.size() * 2);
-    std::vector<tet_mesh::Tet> tets;
     for (std::size_t i = 0; i < tet_indices.size(); ++i) {
         const auto& t = tet_indices[i];
-        std::array<gpf::FaceId, 4> tet_faces;
         std::size_t idx = 0;
         for (auto&& face : {
             std::array<std::size_t, 3>{{t[2], t[1], t[3]}},
@@ -293,7 +285,6 @@ auto extract_boundary_from_tets(
             std::array<std::size_t, 3>{{t[0], t[1], t[2]}}
         }) {
             auto iter = face_index_map.emplace(hash_key(face), faces.size());
-            tet_faces[idx] = gpf::FaceId{iter.first->second};
             if (iter.second) {
                 faces.emplace_back(std::move(face));
                 face_tets.emplace_back(std::array<std::size_t, 2>{{i, gpf::kInvalidIndex}});
@@ -302,7 +293,6 @@ auto extract_boundary_from_tets(
             }
             idx += 1;
         }
-        tets.emplace_back(tet_mesh::Tet{.vertices{gpf::VertexId{t[0]}, gpf::VertexId{t[1]}, gpf::VertexId{t[2]}, gpf::VertexId{t[3]}}, .faces{std::move(tet_faces)}});
     }
     const auto boundary_faces = ranges::iota_view{0ul, faces.size()} | views::filter([&face_tets](std::size_t i) {
         return face_tets[i][1] == gpf::kInvalidIndex;
@@ -311,11 +301,108 @@ auto extract_boundary_from_tets(
     return std::make_tuple(
         std::move(faces),
         std::move(face_tets),
-        std::move(tets),
         std::move(boundary_mesh_vertices),
         std::move(boundary_faces),
         std::move(boundary_mesh)
     );
+}
+
+auto rebuild_tets_from_split_boundary(
+    std::vector<std::array<double, 3>>& tet_points,
+    const std::vector<std::array<std::size_t, 3>>& tet_faces,
+    const std::vector<std::array<std::size_t, 2>>& face_tets,
+    std::vector<std::array<std::size_t, 4>>& tets,
+    const std::vector<std::size_t>& boundary_faces,
+    std::vector<std::size_t>&& boundary_to_tet_vertex,
+    Mesh& boundary_mesh,
+    const std::unordered_map<gpf::FaceId, gpf::FaceId>& face_parent_map
+) {
+    const auto n_old_boundary_vertices = boundary_to_tet_vertex.size();
+    boundary_to_tet_vertex.resize(boundary_mesh.n_vertices_capacity(), gpf::kInvalidIndex);
+    for (std::size_t i = n_old_boundary_vertices; i < boundary_to_tet_vertex.size(); i++) {
+        boundary_to_tet_vertex[i] = tet_points.size();
+        tet_points.emplace_back(boundary_mesh.vertex_prop(gpf::VertexId{i}).pt);
+    }
+
+    // Group boundary_mesh faces by their parent
+    std::unordered_map<gpf::FaceId, std::vector<gpf::FaceId>> parent_to_children;
+    for (const auto [fid, parent] : face_parent_map) {
+        parent_to_children[parent].push_back(fid);
+    }
+
+    for (auto& [parent_fid, children] : parent_to_children) {
+        assert(children.size() > 1);
+
+        // Get the original tet face index
+        auto boundary_face_idx = parent_fid.idx;
+        auto tet_face_idx = boundary_faces[boundary_face_idx];
+
+        // Get the tet that owns this boundary face (only one tet for boundary faces)
+        auto tet_idx = face_tets[tet_face_idx][0];
+        assert(tet_idx != gpf::kInvalidIndex);
+
+        // Get the 4th vertex (d) that's not on the boundary face
+        const auto& boundary_face = tet_faces[tet_face_idx];
+        const auto vd = *ranges::find_if(tets[tet_idx], [&boundary_face](const auto idx) { return idx != boundary_face[0] && idx != boundary_face[1] && idx != boundary_face[2]; });
+
+        // For each sub-face, create a new tet (a, b, c, d) -> sub-tets
+        auto build_new_tet = [vd, &boundary_mesh, &boundary_to_tet_vertex] (std::array<std::size_t, 4>& tet_indices, const gpf::FaceId fid) {
+            for(auto&& [idx, he] : views::zip(tet_indices, boundary_mesh.face(fid).halfedges())) {
+                idx = boundary_to_tet_vertex[he.to().id.idx];
+            }
+            tet_indices[3] = vd;
+        };
+        for (auto child_fid : children) {
+            if (child_fid == parent_fid) {
+                build_new_tet(tets[tet_idx], child_fid);
+            } else {
+                std::array<std::size_t, 4> new_tet;
+                build_new_tet(new_tet, child_fid);
+                tets.emplace_back(std::move(new_tet));
+            }
+        }
+    }
+}
+
+void mark_face_colors(
+    const std::vector<std::vector<gpf::HalfedgeId>>& path_halfedges,
+    const std::vector<ColorRegionBoundaryPart>& outline_parts,
+    Mesh& mesh
+) {
+    // Seed face colors from boundary halfedges
+    // The halfedge orientation: face of halfedge has color1, face of twin has color2
+    std::queue<gpf::FaceId> queue;
+    for (std::size_t i = 0; i < path_halfedges.size(); ++i) {
+        const auto& part = outline_parts[i];
+        for (const auto hid : path_halfedges[i]) {
+            auto he = mesh.halfedge(hid);
+            auto f1 = he.face();
+            auto f2 = he.twin().face();
+            if (f1.prop().color_index == gpf::kInvalidIndex) {
+                f1.prop().color_index = part.color1;
+                queue.push(f1.id);
+            }
+            if (f2.prop().color_index == gpf::kInvalidIndex) {
+                f2.prop().color_index = part.color2;
+                queue.push(f2.id);
+            }
+        }
+    }
+
+    // Flood fill to propagate colors
+    while (!queue.empty()) {
+        auto fid = queue.front();
+        queue.pop();
+        auto f = mesh.face(fid);
+        auto color = f.prop().color_index;
+        for (auto he : f.halfedges()) {
+            auto neighbor = he.twin().face();
+            if (neighbor.prop().color_index == gpf::kInvalidIndex) {
+                neighbor.prop().color_index = color;
+                queue.push(neighbor.id);
+            }
+        }
+    }
 }
 
 auto project_outline_parts(
@@ -323,13 +410,16 @@ auto project_outline_parts(
     const std::vector<ColorRegionBoundaryPart>& outline_parts,
     Mesh& mesh
 ) {
-    project_polylines_on_mesh<3>(
+    auto [path_halfedges, face_parent_map] = project_polylines_on_mesh<3>(
         outline_points,
         outline_parts | views::transform([] (const auto& part) {
             return part.indices;
         }) | ranges::to<std::vector>(),
         mesh
     );
+
+    mark_face_colors(path_halfedges, outline_parts, mesh);
+    return face_parent_map;
 }
 
 }
@@ -397,46 +487,6 @@ auto read_colored_mesh(const std::string& file_name) {
     );
 }
 
-auto tetrahedralize_by_cgal(
-    const std::vector<std::array<double, 3>>& points,
-    const std::vector<std::vector<std::size_t>>& faces
-) {
-    Mesh mesh;
-
-    PMP::polygon_soup_to_polygon_mesh(points, faces, mesh);
-    Polyhedron polyhedron;
-    CGAL::copy_face_graph(mesh, polyhedron);
-    Mesh_domain domain{polyhedron};
-    domain.detect_features(60); // angle in degrees
-    Mesh_criteria criteria(
-        CGAL::parameters::edge_size = 1.1,
-        CGAL::parameters::facet_angle = 30,
-        // CGAL::parameters::facet_size = 0.1,
-        // CGAL::parameters::facet_distance = 0.01,
-        // CGAL::parameters::cell_radius_edge_ratio = 3,
-        CGAL::parameters::cell_size = 1.0
-    );
-    std::vector<std::array<double, 3>> tet_points;
-    std::vector<std::array<std::size_t, 4>> tets;
-    C3t3 c3t3 = CGAL::make_mesh_3<C3t3>(domain, criteria);
-    std::unordered_map<C3t3::Triangulation::Vertex_handle, std::size_t> vertex_index_map;
-    for (auto& v : c3t3.triangulation().finite_vertex_handles()) {
-        vertex_index_map[v] = tet_points.size();
-        auto& p = v->point();
-        tet_points.emplace_back(std::array<double, 3>{{p[0], p[1], p[2]}});
-    }
-    for (auto cell = c3t3.cells_begin(); cell != c3t3.cells_end(); cell++) {
-        std::array<std::size_t, 4> indices;
-        for (std::size_t i = 0; i < 4; i++) {
-            indices[i] = vertex_index_map[cell->vertex(i)];
-        }
-        tets.emplace_back(std::move(indices));
-
-    }
-
-    return std::make_pair(std::move(tet_points), std::move(tets));
-}
-
 auto read_msh(const std::string& file_name) {
     mshio::MshSpec spec = mshio::load_msh(file_name);
     // Build a map from node tag to index
@@ -496,10 +546,31 @@ auto build_triangle_groups(
 }
 
 
+auto build_triangle_groups(
+    const tet_mesh_boundary::Mesh& mesh,
+    const std::size_t n_materials
+) {
+    std::vector<std::vector<Triangle>> triangle_groups(n_materials);
+    for (const auto face : mesh.faces()) {
+        const auto color_idx = face.prop().color_index;
+            auto pts = face.halfedges() | views::transform([](auto he) {
+                const auto& pt = he.to().prop().pt;
+                return Point_3(pt[0], pt[1], pt[2]);
+            }) | ranges::to<std::vector>();
+        triangle_groups[color_idx].emplace_back(std::move(pts[0]), std::move(pts[1]), std::move(pts[2]));
+    }
+    return triangle_groups;
+}
+
+
 auto build_tet_mesh(
     const std::vector<std::array<double, 3>>& points,
-    const std::vector<std::array<std::size_t, 4>>& tet_indices
+    const std::vector<std::array<std::size_t, 4>>& tet_indices,
+    std::vector<std::array<std::size_t, 3>>& faces,
+    std::vector<std::array<std::size_t, 2>>& face_tets
 ) {
+    faces.clear();
+    face_tets.clear();
     auto hash = [](const std::array<std::size_t, 3>& key) {
         return boost::hash_value(key);
     };
@@ -509,9 +580,6 @@ auto build_tet_mesh(
         return ret;
     };
     std::unordered_map<std::array<std::size_t, 3>, std::size_t, decltype(hash)> face_index_map(tet_indices.size() * 2, std::move(hash));
-    std::vector<std::array<std::size_t, 3>> faces;
-    std::vector<std::array<std::size_t, 2>> face_tets;
-    face_tets.reserve(tet_indices.size() * 2);
     std::vector<tet_mesh::Tet> tets;
     for (std::size_t i = 0; i < tet_indices.size(); ++i) {
         const auto& t = tet_indices[i];
@@ -592,14 +660,20 @@ int main(int argc, char* argv[]) {
     auto [tet_points, tet_indices] = read_msh(msh_path);
 
     auto [outline_points, outline_parts] = extract_color_boundaries(points, faces, label_face_groups);
-    auto [tet_faces, face_tets, tets_temp, boundary_vertices, boundary_faces, boundary_mesh] = tet_mesh_boundary::extract_boundary_from_tets(tet_points, tet_indices);
-    project_outline_parts(outline_points, outline_parts, boundary_mesh);
+    auto [tet_faces, face_tets, boundary_vertices, boundary_faces, boundary_mesh] = tet_mesh_boundary::extract_boundary_from_tets(tet_points, tet_indices);
+    auto face_parent_map = tet_mesh_boundary::project_outline_parts(outline_points, outline_parts, boundary_mesh);
     write_mesh("fine.obj", boundary_mesh);
 
-    auto [tet_mesh, tets] = build_tet_mesh(tet_points, tet_indices);
-    auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
+    // Rebuild tets from split boundary faces
+    tet_mesh_boundary::rebuild_tets_from_split_boundary(
+        tet_points, tet_faces, face_tets, tet_indices, boundary_faces, std::move(boundary_vertices), boundary_mesh, face_parent_map
+    );
 
-    // write_msh("123.obj", tet_mesh);
+    auto [tet_mesh, tets] = build_tet_mesh(tet_points, tet_indices, tet_faces, face_tets);
+    // auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
+    auto triangle_groups = build_triangle_groups(boundary_mesh, label_face_groups.size());
+    write_msh("123.obj", tet_mesh);
+
     setup_neg_distance(tet_mesh, triangle_groups);
     do_material_interface(tets, tet_mesh);
     return 0;

@@ -1,4 +1,3 @@
-#include "gpf/ids.hpp"
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -254,6 +253,9 @@ void triangulate_on_face(
     const auto n_old_vertices = mesh.n_vertices_capacity();
     mesh.new_vertices(point_indices.size());
     face_vertices.append_range(ranges::iota_view{n_old_vertices, mesh.n_vertices_capacity()} | views::transform([](const auto idx) { return gpf::VertexId{idx}; }));
+    if (face_vertices.size() == 3) {
+        return;
+    }
     for (auto [pid, vid] : views::zip(point_indices, ranges::drop_view{face_vertices, static_cast<std::ptrdiff_t>(n_old_face_vertices)})) {
         mesh.vertex_prop(vid).pt = all_points[pid];
         point_vertices[pid] = vid;
@@ -1018,5 +1020,17 @@ auto project_polylines_on_mesh(
         detail::triangulate_on_face(mesh, fid, {}, ccs, {}, segment_vertices, edge_point_vertices, &face_parent_map);
     }
 
-    return face_parent_map;
+    std::vector<std::vector<gpf::HalfedgeId>> path_halfedges(polyline_paths.size());
+
+    return make_pair(
+        std::move(polyline_paths) | std::views::transform([&get_vertex_id, &mesh](auto&& path) {
+            std::vector<gpf::HalfedgeId> halfedges;
+            halfedges.reserve(path.size() - 1);
+            for (std::size_t i = 0; i + 1 < path.size(); ++i) {
+                halfedges.push_back(mesh.he_from_vertices(get_vertex_id(path[i]), get_vertex_id(path[i + 1])));
+            }
+            return halfedges;
+        }) | std::ranges::to<std::vector>(),
+        std::move(face_parent_map)
+    );
 }

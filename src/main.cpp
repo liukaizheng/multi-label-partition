@@ -84,6 +84,66 @@ void write_msh(const std::string& name, const tet_mesh::TetMesh& mesh) {
     }
 }
 
+void write_tet_msh(
+    const std::string& filename,
+    const std::vector<std::array<double, 3>>& points,
+    const std::vector<std::array<std::size_t, 4>>& tets
+) {
+    mshio::MshSpec spec;
+    spec.mesh_format.version = "2.2";
+    spec.mesh_format.file_type = 0; // ASCII
+    spec.mesh_format.data_size = sizeof(std::size_t);
+
+    // Nodes
+    spec.nodes.num_entity_blocks = 1;
+    spec.nodes.num_nodes = points.size();
+    spec.nodes.min_node_tag = 1;
+    spec.nodes.max_node_tag = points.size();
+
+    mshio::NodeBlock node_block;
+    node_block.entity_dim = 3;
+    node_block.entity_tag = 1;
+    node_block.parametric = 0;
+    node_block.num_nodes_in_block = points.size();
+    node_block.tags.resize(points.size());
+    node_block.data.resize(points.size() * 3);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        node_block.tags[i] = i + 1;
+        node_block.data[i * 3 + 0] = points[i][0];
+        node_block.data[i * 3 + 1] = points[i][1];
+        node_block.data[i * 3 + 2] = points[i][2];
+    }
+    spec.nodes.entity_blocks.push_back(std::move(node_block));
+
+    // Elements (tetrahedra, type 4)
+    spec.elements.num_entity_blocks = 1;
+    spec.elements.num_elements = tets.size();
+    spec.elements.min_element_tag = 1;
+    spec.elements.max_element_tag = tets.size();
+
+    mshio::ElementBlock elem_block;
+    elem_block.entity_dim = 3;
+    elem_block.entity_tag = 1;
+    elem_block.element_type = 4;
+    elem_block.num_elements_in_block = tets.size();
+    elem_block.data.resize(tets.size() * 5);
+    for (std::size_t i = 0; i < tets.size(); ++i) {
+        std::size_t offset = i * 5;
+        elem_block.data[offset + 0] = i + 1;
+        elem_block.data[offset + 1] = tets[i][0] + 1;
+        elem_block.data[offset + 2] = tets[i][1] + 1;
+        elem_block.data[offset + 3] = tets[i][2] + 1;
+        elem_block.data[offset + 4] = tets[i][3] + 1;
+    }
+    spec.elements.entity_blocks.push_back(std::move(elem_block));
+
+    mshio::VolumeEntity vol;
+    vol.tag = 1;
+    spec.entities.volumes.push_back(std::move(vol));
+
+    mshio::save_msh(filename, spec);
+}
+
 template<typename Mesh>
 void write_mesh(const std::string& name, const Mesh& mesh) {
     std::ofstream out(name);
@@ -271,6 +331,9 @@ auto extract_boundary_from_tets(
         std::sort(ret.begin(), ret.end());
         return ret;
     };
+    auto edge_hash = [](const std::array<std::size_t, 2>& key) {
+        return boost::hash_value(key);
+    };
     std::unordered_map<std::array<std::size_t, 3>, std::size_t, decltype(hash)> face_index_map(tet_indices.size() * 2, std::move(hash));
     std::vector<std::array<std::size_t, 3>> faces;
     std::vector<std::array<std::size_t, 2>> face_tets;
@@ -298,12 +361,51 @@ auto extract_boundary_from_tets(
         return face_tets[i][1] == gpf::kInvalidIndex;
     }) | ranges::to<std::vector>();
     auto [boundary_mesh_vertices, boundary_mesh] = compress_mesh(points, faces, boundary_faces);
+
+    // Build tet-vertex -> incident tet-face indices adjacency
+    std::unordered_map<std::size_t, std::vector<std::size_t>> vertex_faces;
+    for (std::size_t fi = 0; fi < faces.size(); ++fi) {
+        for (auto vid : faces[fi]) {
+            vertex_faces[vid].push_back(fi);
+        }
+    }
+
+    // For each boundary edge, find all tets sharing it by intersecting
+    // the face adjacency lists of its two tet-vertex endpoints
+    std::unordered_map<std::array<std::size_t, 2>, std::vector<std::size_t>, decltype(edge_hash)> boundary_edge_tets(boundary_mesh.n_edges(), edge_hash);
+    for (auto e : boundary_mesh.edges()) {
+        auto he = e.halfedge();
+        auto bv0 = he.from().id.idx;
+        auto bv1 = he.to().id.idx;
+        auto tv0 = boundary_mesh_vertices[bv0];
+        auto tv1 = boundary_mesh_vertices[bv1];
+        // Faces containing both tv0 and tv1
+        const auto& flist0 = vertex_faces[tv0];
+        const auto& flist1 = vertex_faces[tv1];
+        const auto& shorter = flist0.size() <= flist1.size() ? flist0 : flist1;
+        const auto& longer = flist0.size() <= flist1.size() ? flist1 : flist0;
+        std::unordered_set<std::size_t> longer_set(longer.begin(), longer.end());
+        std::unordered_set<std::size_t> tet_set;
+        for (auto fi : shorter) {
+            if (longer_set.contains(fi)) {
+                for (auto ti : face_tets[fi]) {
+                    if (ti != gpf::kInvalidIndex) {
+                        tet_set.insert(ti);
+                    }
+                }
+            }
+        }
+        auto bkey = std::array<std::size_t, 2>{{std::min(bv0, bv1), std::max(bv0, bv1)}};
+        boundary_edge_tets[bkey] = std::vector<std::size_t>(tet_set.begin(), tet_set.end());
+    }
+
     return std::make_tuple(
         std::move(faces),
         std::move(face_tets),
         std::move(boundary_mesh_vertices),
         std::move(boundary_faces),
-        std::move(boundary_mesh)
+        std::move(boundary_mesh),
+        std::move(boundary_edge_tets)
     );
 }
 
@@ -405,21 +507,24 @@ void mark_face_colors(
     }
 }
 
-auto project_outline_parts(
+void project_outline_parts(
     std::vector<std::array<double, 3>>& outline_points,
     const std::vector<ColorRegionBoundaryPart>& outline_parts,
-    Mesh& mesh
+    Mesh& mesh,
+    std::unordered_map<gpf::FaceId, gpf::FaceId>& face_parent_map,
+    std::unordered_map<gpf::EdgeId, gpf::EdgeId>& edge_parent_map
 ) {
-    auto [path_halfedges, face_parent_map] = project_polylines_on_mesh<3>(
+    auto path_halfedges = project_polylines_on_mesh<3>(
         outline_points,
         outline_parts | views::transform([] (const auto& part) {
             return part.indices;
         }) | ranges::to<std::vector>(),
-        mesh
+        mesh,
+        &face_parent_map,
+        &edge_parent_map
     );
 
     mark_face_colors(path_halfedges, outline_parts, mesh);
-    return face_parent_map;
 }
 
 }
@@ -597,6 +702,7 @@ auto build_tet_mesh(
                 faces.emplace_back(std::move(face));
                 face_tets.emplace_back(std::array<std::size_t, 2>{{i, gpf::kInvalidIndex}});
             } else {
+                assert(face_tets[iter.first->second][1] == gpf::kInvalidIndex);
                 face_tets[iter.first->second][1] = i;
             }
             idx += 1;
@@ -660,8 +766,10 @@ int main(int argc, char* argv[]) {
     auto [tet_points, tet_indices] = read_msh(msh_path);
 
     auto [outline_points, outline_parts] = extract_color_boundaries(points, faces, label_face_groups);
-    auto [tet_faces, face_tets, boundary_vertices, boundary_faces, boundary_mesh] = tet_mesh_boundary::extract_boundary_from_tets(tet_points, tet_indices);
-    auto face_parent_map = tet_mesh_boundary::project_outline_parts(outline_points, outline_parts, boundary_mesh);
+    auto [tet_faces, face_tets, boundary_vertices, boundary_faces, boundary_mesh, boundary_edge_tets] = tet_mesh_boundary::extract_boundary_from_tets(tet_points, tet_indices);
+    std::unordered_map<gpf::FaceId, gpf::FaceId> face_parent_map;
+    std::unordered_map<gpf::EdgeId, gpf::EdgeId> edge_parent_map;
+    tet_mesh_boundary::project_outline_parts(outline_points, outline_parts, boundary_mesh, face_parent_map, edge_parent_map);
     write_mesh("fine.obj", boundary_mesh);
 
     // Rebuild tets from split boundary faces
@@ -673,6 +781,7 @@ int main(int argc, char* argv[]) {
     // auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
     auto triangle_groups = build_triangle_groups(boundary_mesh, label_face_groups.size());
     write_msh("123.obj", tet_mesh);
+    write_tet_msh("output.msh", tet_points, tet_indices);
 
     setup_neg_distance(tet_mesh, triangle_groups);
     do_material_interface(tets, tet_mesh);

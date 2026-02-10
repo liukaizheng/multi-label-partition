@@ -1,4 +1,5 @@
 #include "material_interface.hpp"
+
 #include "gpf/detail.hpp"
 #include "gpf/ids.hpp"
 #include "gpf/mesh.hpp"
@@ -6,19 +7,19 @@
 #include "gpf/utils.hpp"
 #include "tet_mesh.hpp"
 
-#include <iterator>
+#include <Eigen/Dense>
+
+#include <boost/container/small_vector.hpp>
+#include <boost/functional/hash.hpp>
+
 #include <predicates/predicates.hpp>
 
-#include <Eigen/Dense>
 #include <algorithm>
+#include <fstream>
+#include <iterator>
 #include <ranges>
 #include <unordered_map>
 #include <unordered_set>
-
-#include <boost/functional/hash.hpp>
-#include <boost/container/small_vector.hpp>
-
-#include <fstream>
 #include <utility>
 
 namespace ranges = std::ranges;
@@ -814,7 +815,7 @@ void MaterialInterface::extract(
                 material_indices[cells[f_props.cells[0]].material - 4]
             }});
         }
-        if (info.faces.size() == 174) {
+        if (info.faces.size() == 11697) {
             const auto a = 2;
         }
     }
@@ -1229,7 +1230,7 @@ void do_material_interface(
 
         const auto& tvs = tet.vertices;
         if (ranges::count_if(tvs, [](const auto vid) {
-            return vid.idx == 209 || vid.idx == 48269 || vid.idx == 36532 || vid.idx == 48159;
+            return vid.idx == 5302 || vid.idx == 40349 || vid.idx == 40347 || vid.idx == 10644;
         }) >= 3) {
             const auto a = 2;
             save_tet(tid - 1, tets, tet_mesh);
@@ -1251,7 +1252,7 @@ void do_material_interface(
             if (tet_material_set.contains(m)) {
                 continue;
             }
-            auto count = ranges::count_if(ranges::zip_view{tvs, std::move(min_material_values)},  [&tet_mesh, m] (auto pair) {
+            auto count = ranges::count_if(ranges::zip_view{tvs, min_material_values},  [&tet_mesh, m] (auto pair) {
                 auto [vid, v] = pair;
                 return tet_mesh.vertex(vid).data().property.distances[m] > v;
             });

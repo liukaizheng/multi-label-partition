@@ -182,13 +182,33 @@ void split_edge_by_points(
     PointAccessor&& get_point,
     const std::vector<std::size_t>& edge_point_indices,
     std::vector<gpf::VertexId>& point_vertices,
-    const double eps
+    const double eps,
+    std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr
 ) {
+    // Find the root parent for this edge
+    auto get_root_parent = [&edge_parent_map](gpf::EdgeId e) {
+        gpf::EdgeId root = e;
+        if (edge_parent_map) {
+            auto it = edge_parent_map->find(e);
+            if (it != edge_parent_map->end()) {
+                root = it->second;
+            }
+        }
+        return root;
+    };
+
     if (edge_point_indices.size() == 1) {
+        const auto root_parent = get_root_parent(eid);
         const auto new_vid = mesh.split_edge(eid);
         const auto pid = edge_point_indices[0];
         mesh.vertex_prop(new_vid).pt = get_point(pid);
         point_vertices[pid] = new_vid;
+        if (edge_parent_map) {
+            // eid is reused for one sub-edge, new edge is the other
+            (*edge_parent_map)[eid] = root_parent;
+            auto new_eid = mesh.vertex(new_vid).halfedge().edge().id;
+            (*edge_parent_map)[new_eid] = root_parent;
+        }
     } else {
         auto curr_hid = mesh.edge(eid).halfedge().id;
         const auto [va, vb] = mesh.he_vertices(curr_hid);
@@ -206,6 +226,7 @@ void split_edge_by_points(
             }) | std::ranges::to<std::vector>();
 
         std::sort(indices.begin(), indices.end(), [&distances](auto i, auto j) { return distances[i] < distances[j]; });
+        const auto root_parent = get_root_parent(eid);
         std::size_t j = 0;
         gpf::EdgeId curr_eid = eid;
         for (std::size_t i = 0; i < indices.size(); i++) {
@@ -215,11 +236,18 @@ void split_edge_by_points(
                 auto new_v = mesh.vertex(new_vid);
                 new_v.prop().pt = get_point(pid);
                 point_vertices[pid] = new_vid;
+                if (edge_parent_map) {
+                    auto new_eid = new_v.halfedge().edge().id;
+                    (*edge_parent_map)[new_eid] = root_parent;
+                }
                 curr_eid = new_v.halfedge().edge().id;
                 j = i;
             } else {
                 point_vertices[pid] = point_vertices[edge_point_indices[indices[j]]];
             }
+        }
+        if (edge_parent_map) {
+            (*edge_parent_map)[eid] = root_parent;
         }
     }
 }
@@ -306,7 +334,8 @@ auto project_points_on_mesh(
     std::vector<std::array<double, 3>>& points,
     gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
     const double eps,
-    std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr
+    std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr,
+    std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr
 ) {
     using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
     using Point_3 = Kernel::Point_3;
@@ -362,7 +391,7 @@ auto project_points_on_mesh(
     }
 
     for (const auto& [eid, point_indices] : edge_to_points_map) {
-        split_edge_by_points(mesh, eid, [&points](std::size_t pid) { return points[pid]; }, point_indices, point_vertices, eps);
+        split_edge_by_points(mesh, eid, [&points](std::size_t pid) { return points[pid]; }, point_indices, point_vertices, eps, edge_parent_map);
     }
 
     for (const auto& [fid, info] : face_info_map) {
@@ -909,14 +938,14 @@ template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
 auto project_polylines_on_mesh(
     std::vector<std::array<double, 3>>& points,
     const std::vector<std::vector<std::size_t>>& polylines,
-    gpf::ManifoldMesh<VP, HP, EP, FP>& mesh
+    gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
+    std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr,
+    std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr
 ) {
     using Mesh = gpf::ManifoldMesh<VP, HP, EP, FP>;
 
-    std::unordered_map<gpf::FaceId, gpf::FaceId> face_parent_map;
-
     constexpr double EPS = 1e-3;
-    auto point_vertices = detail::project_points_on_mesh(points, mesh, EPS, &face_parent_map);
+    auto point_vertices = detail::project_points_on_mesh(points, mesh, EPS, face_parent_map, edge_parent_map);
     detail::AuxiliaryMesh aux_mesh;
     aux_mesh.copy_from(mesh);
     gpf::update_edge_lengths<N>(aux_mesh, [mesh](auto v) {
@@ -999,7 +1028,7 @@ auto project_polylines_on_mesh(
     for (const auto& [eid, point_indices] : edge_to_points_map) {
         detail::split_edge_by_points(mesh, eid, [&edge_points](std::size_t pid) {
             return edge_points[pid].pt;
-        }, point_indices, edge_point_vertices, EPS);
+        }, point_indices, edge_point_vertices, EPS, edge_parent_map);
     }
 
     auto get_vertex_id = [&edge_point_vertices](auto anchor) {
@@ -1017,20 +1046,15 @@ auto project_polylines_on_mesh(
         const auto& ccs = ccs_and_segments.first;
         const auto& segments = ccs_and_segments.second;
         auto segment_vertices = segments | std::views::transform(get_vertex_id) | std::ranges::to<std::vector>();
-        detail::triangulate_on_face(mesh, fid, {}, ccs, {}, segment_vertices, edge_point_vertices, &face_parent_map);
+        detail::triangulate_on_face(mesh, fid, {}, ccs, {}, segment_vertices, edge_point_vertices, face_parent_map);
     }
 
-    std::vector<std::vector<gpf::HalfedgeId>> path_halfedges(polyline_paths.size());
-
-    return make_pair(
-        std::move(polyline_paths) | std::views::transform([&get_vertex_id, &mesh](auto&& path) {
-            std::vector<gpf::HalfedgeId> halfedges;
-            halfedges.reserve(path.size() - 1);
-            for (std::size_t i = 0; i + 1 < path.size(); ++i) {
-                halfedges.push_back(mesh.he_from_vertices(get_vertex_id(path[i]), get_vertex_id(path[i + 1])));
-            }
-            return halfedges;
-        }) | std::ranges::to<std::vector>(),
-        std::move(face_parent_map)
-    );
+    return std::move(polyline_paths) | std::views::transform([&get_vertex_id, &mesh](auto&& path) {
+        std::vector<gpf::HalfedgeId> halfedges;
+        halfedges.reserve(path.size() - 1);
+        for (std::size_t i = 0; i + 1 < path.size(); ++i) {
+            halfedges.push_back(mesh.he_from_vertices(get_vertex_id(path[i]), get_vertex_id(path[i + 1])));
+        }
+        return halfedges;
+    }) | std::ranges::to<std::vector>();
 }

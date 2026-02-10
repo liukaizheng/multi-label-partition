@@ -331,16 +331,15 @@ auto extract_boundary_from_tets(
         std::sort(ret.begin(), ret.end());
         return ret;
     };
-    auto edge_hash = [](const std::array<std::size_t, 2>& key) {
-        return boost::hash_value(key);
-    };
     std::unordered_map<std::array<std::size_t, 3>, std::size_t, decltype(hash)> face_index_map(tet_indices.size() * 2, std::move(hash));
     std::vector<std::array<std::size_t, 3>> faces;
     std::vector<std::array<std::size_t, 2>> face_tets;
+    std::vector<std::array<std::size_t, 4>> tet_faces;
     face_tets.reserve(tet_indices.size() * 2);
     for (std::size_t i = 0; i < tet_indices.size(); ++i) {
         const auto& t = tet_indices[i];
         std::size_t idx = 0;
+        std::array<std::size_t, 4> tet_face{};
         for (auto&& face : {
             std::array<std::size_t, 3>{{t[2], t[1], t[3]}},
             std::array<std::size_t, 3>{{t[0], t[2], t[3]}},
@@ -348,6 +347,7 @@ auto extract_boundary_from_tets(
             std::array<std::size_t, 3>{{t[0], t[1], t[2]}}
         }) {
             auto iter = face_index_map.emplace(hash_key(face), faces.size());
+            tet_face[idx] = iter.first->second;
             if (iter.second) {
                 faces.emplace_back(std::move(face));
                 face_tets.emplace_back(std::array<std::size_t, 2>{{i, gpf::kInvalidIndex}});
@@ -356,47 +356,66 @@ auto extract_boundary_from_tets(
             }
             idx += 1;
         }
+        tet_faces.emplace_back(std::move(tet_face));
     }
     const auto boundary_faces = ranges::iota_view{0ul, faces.size()} | views::filter([&face_tets](std::size_t i) {
         return face_tets[i][1] == gpf::kInvalidIndex;
     }) | ranges::to<std::vector>();
     auto [boundary_mesh_vertices, boundary_mesh] = compress_mesh(points, faces, boundary_faces);
 
-    // Build tet-vertex -> incident tet-face indices adjacency
-    std::unordered_map<std::size_t, std::vector<std::size_t>> vertex_faces;
-    for (std::size_t fi = 0; fi < faces.size(); ++fi) {
-        for (auto vid : faces[fi]) {
-            vertex_faces[vid].push_back(fi);
-        }
-    }
-
     // For each boundary edge, find all tets sharing it by intersecting
     // the face adjacency lists of its two tet-vertex endpoints
-    std::unordered_map<std::array<std::size_t, 2>, std::vector<std::size_t>, decltype(edge_hash)> boundary_edge_tets(boundary_mesh.n_edges(), edge_hash);
-    for (auto e : boundary_mesh.edges()) {
-        auto he = e.halfedge();
-        auto bv0 = he.from().id.idx;
-        auto bv1 = he.to().id.idx;
-        auto tv0 = boundary_mesh_vertices[bv0];
-        auto tv1 = boundary_mesh_vertices[bv1];
-        // Faces containing both tv0 and tv1
-        const auto& flist0 = vertex_faces[tv0];
-        const auto& flist1 = vertex_faces[tv1];
-        const auto& shorter = flist0.size() <= flist1.size() ? flist0 : flist1;
-        const auto& longer = flist0.size() <= flist1.size() ? flist1 : flist0;
-        std::unordered_set<std::size_t> longer_set(longer.begin(), longer.end());
-        std::unordered_set<std::size_t> tet_set;
-        for (auto fi : shorter) {
-            if (longer_set.contains(fi)) {
-                for (auto ti : face_tets[fi]) {
-                    if (ti != gpf::kInvalidIndex) {
-                        tet_set.insert(ti);
+    std::unordered_map<gpf::EdgeId, std::vector<std::size_t>> boundary_edge_tets(boundary_mesh.n_edges());
+    auto add_tets_into_map = [&](const gpf::EdgeId eid) {
+        auto ha = boundary_mesh.edge(eid).halfedge();
+        auto hb = ha.twin();
+        auto va = boundary_mesh_vertices[ha.to().id.idx];
+        auto vb = boundary_mesh_vertices[hb.to().id.idx];
+        auto start_fid = boundary_faces[ha.face().id.idx];
+        auto end_fid = boundary_faces[hb.face().id.idx];
+        auto start_tid = face_tets[start_fid][0];
+        auto end_tid = face_tets[end_fid][0];
+
+        auto oppo_vertex = [&faces, va, vb](const std::size_t fid) {
+            for (const auto vid : faces[fid]) {
+                if (vid != va && vid != vb) {
+                    return vid;
+                }
+            }
+            return gpf::kInvalidIndex;
+        };
+        auto curr_fid = start_fid;
+        auto curr_tid = start_tid;
+        auto vc = oppo_vertex(curr_fid);
+        while (true) {
+            std::size_t vc_idx{gpf::kInvalidIndex};
+            std::size_t vd_idx{gpf::kInvalidIndex};
+            for (std::size_t i = 0; i < 4ul; i++) {
+                auto vid = tet_indices[curr_tid][i];
+                if (vid == vc) {
+                    vc_idx = i;
+                    if (vd_idx != gpf::kInvalidIndex) {
+                        break;
+                    }
+                } else if (vid != va && vid != vb) {
+                    vd_idx = i;
+                    if (vc_idx != gpf::kInvalidIndex) {
+                        break;
                     }
                 }
             }
+            auto vd = tet_indices[curr_tid][vd_idx];
+            curr_fid = tet_faces[curr_tid][vc_idx];
+            curr_tid = face_tets[curr_fid][0] == curr_tid ? face_tets[curr_fid][1] : face_tets[curr_fid][0];
+            if (curr_tid == end_tid) {
+                break;
+            }
+            boundary_edge_tets[eid].push_back(curr_tid);
+            vc = vd;
         }
-        auto bkey = std::array<std::size_t, 2>{{std::min(bv0, bv1), std::max(bv0, bv1)}};
-        boundary_edge_tets[bkey] = std::vector<std::size_t>(tet_set.begin(), tet_set.end());
+    };
+    for (auto e : boundary_mesh.edges()) {
+        add_tets_into_map(e.id);
     }
 
     return std::make_tuple(

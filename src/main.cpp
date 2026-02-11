@@ -375,6 +375,9 @@ auto extract_boundary_from_tets(
         auto end_fid = boundary_faces[hb.face().id.idx];
         auto start_tid = face_tets[start_fid][0];
         auto end_tid = face_tets[end_fid][0];
+        if (start_tid == end_tid) {
+            return;
+        }
 
         auto oppo_vertex = [&faces, va, vb](const std::size_t fid) {
             for (const auto vid : faces[fid]) {
@@ -428,23 +431,15 @@ auto extract_boundary_from_tets(
     );
 }
 
-auto rebuild_tets_from_split_boundary(
-    std::vector<std::array<double, 3>>& tet_points,
+void split_tets_by_face(
     const std::vector<std::array<std::size_t, 3>>& tet_faces,
     const std::vector<std::array<std::size_t, 2>>& face_tets,
     std::vector<std::array<std::size_t, 4>>& tets,
     const std::vector<std::size_t>& boundary_faces,
-    std::vector<std::size_t>&& boundary_to_tet_vertex,
+    const std::vector<std::size_t>& boundary_to_tet_vertex,
     Mesh& boundary_mesh,
     const std::unordered_map<gpf::FaceId, gpf::FaceId>& face_parent_map
 ) {
-    const auto n_old_boundary_vertices = boundary_to_tet_vertex.size();
-    boundary_to_tet_vertex.resize(boundary_mesh.n_vertices_capacity(), gpf::kInvalidIndex);
-    for (std::size_t i = n_old_boundary_vertices; i < boundary_to_tet_vertex.size(); i++) {
-        boundary_to_tet_vertex[i] = tet_points.size();
-        tet_points.emplace_back(boundary_mesh.vertex_prop(gpf::VertexId{i}).pt);
-    }
-
     // Group boundary_mesh faces by their parent
     std::unordered_map<gpf::FaceId, std::vector<gpf::FaceId>> parent_to_children;
     for (const auto [fid, parent] : face_parent_map) {
@@ -483,6 +478,131 @@ auto rebuild_tets_from_split_boundary(
             }
         }
     }
+}
+
+void split_tets_by_edge(
+    std::vector<std::array<std::size_t, 4>>& tets,
+    const std::vector<std::size_t>& boundary_to_tet_vertex,
+    Mesh& boundary_mesh,
+    const std::unordered_map<gpf::EdgeId, gpf::EdgeId>& edge_parent_map,
+    const std::unordered_map<gpf::EdgeId, std::vector<std::size_t>>& boundary_edge_tets
+) {
+    // Group child edges by their root parent edge
+    std::unordered_map<gpf::EdgeId, std::vector<gpf::EdgeId>> edge_parent_to_children;
+    for (const auto [child_eid, parent_eid] : edge_parent_map) {
+        edge_parent_to_children[parent_eid].push_back(child_eid);
+    }
+
+    for (auto& [parent_eid, child_edges] : edge_parent_to_children) {
+        // Only process edges that have interior tets
+        auto it = boundary_edge_tets.find(parent_eid);
+        if (it == boundary_edge_tets.end()) {
+            continue;
+        }
+        const auto& interior_tets = it->second;
+        if (interior_tets.empty()) {
+            continue;
+        }
+
+        std::unordered_map<gpf::VertexId, std::vector<gpf::HalfedgeId>> vertex_to_halfedges_map(child_edges.size() + 1ul);
+        for (const auto eid : child_edges) {
+            for (const auto he : boundary_mesh.edge(eid).halfedges()) {
+                vertex_to_halfedges_map[he.from().id].push_back(he.id);
+            }
+        }
+        std::vector<gpf::HalfedgeId> chain;
+        chain.reserve(child_edges.size());
+        {
+            auto curr_hid = ranges::find_if(vertex_to_halfedges_map, [](const auto& pair) {
+                return pair.second.size() == 1;
+            })->second[0];
+            while (true) {
+                chain.emplace_back(curr_hid);
+                auto vid = boundary_mesh.he_to(curr_hid);
+                auto& candidates = vertex_to_halfedges_map[vid];
+                if (candidates.size() != 2) {
+                    break;
+                }
+                curr_hid = boundary_mesh.he_edge(candidates[0]) == boundary_mesh.he_edge(curr_hid) ? candidates[1] : candidates[0];
+            }
+            assert(chain.size() == child_edges.size());
+        }
+
+        // For each interior tet sharing this edge, split it
+        for (const auto tet_idx : interior_tets) {
+            auto& tet = tets[tet_idx];
+
+            auto e_va = boundary_to_tet_vertex[boundary_mesh.he_from(chain.front()).idx];
+            auto e_vb = boundary_to_tet_vertex[boundary_mesh.he_to(chain.back()).idx];
+
+
+            // Find the two vertices of this tet that are on the edge, and the other two
+            std::size_t e_va_local = gpf::kInvalidIndex, e_vb_local = gpf::kInvalidIndex;
+            for (std::size_t i = 0; i < 4; i++) {
+                if (tet[i] == e_va) {
+                    e_va_local = i;
+                    if (e_vb_local != gpf::kInvalidIndex) {
+                        break;
+                    }
+                } else if (tet[i] == e_vb) {
+                    e_vb_local = i;
+                    if (e_va_local != gpf::kInvalidIndex) {
+                        break;
+                    }
+                }
+            }
+            assert(e_va_local != gpf::kInvalidIndex && e_vb_local != gpf::kInvalidIndex);
+            auto hid_local = gpf::oriented_index(5ul - tet_mesh::Tet::edge_index(e_va_local, e_vb_local), e_va_local > e_vb_local);
+            constexpr std::array<std::array<std::size_t, 2>, 12> EDGE_TO_VC_CD = {{
+                {2, 3},
+                {3, 2},
+                {3, 1},
+                {1, 3},
+                {1, 2},
+                {2, 1},
+                {0, 3},
+                {3, 0},
+                {2, 0},
+                {0, 2},
+                {0, 1},
+                {1, 0}
+            }};
+            auto [vc, vd] = EDGE_TO_VC_CD[hid_local];
+            vc = tet[vc];
+            vd = tet[vd];
+
+            tet = {e_va, boundary_to_tet_vertex[boundary_mesh.he_to(chain.front()).idx], vc, vd};
+            for (std::size_t i = 1; i < chain.size(); i++) {
+                auto hid = chain[i];
+                auto va = boundary_to_tet_vertex[boundary_mesh.he_from(hid).idx];
+                auto vb = boundary_to_tet_vertex[boundary_mesh.he_to(hid).idx];
+                tets.emplace_back(std::array<std::size_t, 4>{va, vb, vc, vd});
+            }
+        }
+    }
+}
+
+auto rebuild_tets_from_split_boundary(
+    std::vector<std::array<double, 3>>& tet_points,
+    const std::vector<std::array<std::size_t, 3>>& tet_faces,
+    const std::vector<std::array<std::size_t, 2>>& face_tets,
+    std::vector<std::array<std::size_t, 4>>& tets,
+    const std::vector<std::size_t>& boundary_faces,
+    std::vector<std::size_t>&& boundary_to_tet_vertex,
+    Mesh& boundary_mesh,
+    const std::unordered_map<gpf::FaceId, gpf::FaceId>& face_parent_map,
+    const std::unordered_map<gpf::EdgeId, gpf::EdgeId>& edge_parent_map,
+    const std::unordered_map<gpf::EdgeId, std::vector<std::size_t>>& boundary_edge_tets
+) {
+    const auto n_old_boundary_vertices = boundary_to_tet_vertex.size();
+    boundary_to_tet_vertex.resize(boundary_mesh.n_vertices_capacity(), gpf::kInvalidIndex);
+    for (std::size_t i = n_old_boundary_vertices; i < boundary_to_tet_vertex.size(); i++) {
+        boundary_to_tet_vertex[i] = tet_points.size();
+        tet_points.emplace_back(boundary_mesh.vertex_prop(gpf::VertexId{i}).pt);
+    }
+
+    split_tets_by_face(tet_faces, face_tets, tets, boundary_faces, boundary_to_tet_vertex, boundary_mesh, face_parent_map);
+    split_tets_by_edge(tets, boundary_to_tet_vertex, boundary_mesh, edge_parent_map, boundary_edge_tets);
 }
 
 void mark_face_colors(
@@ -791,9 +911,9 @@ int main(int argc, char* argv[]) {
     tet_mesh_boundary::project_outline_parts(outline_points, outline_parts, boundary_mesh, face_parent_map, edge_parent_map);
     write_mesh("fine.obj", boundary_mesh);
 
-    // Rebuild tets from split boundary faces
+    // Rebuild tets from split boundary faces and edges
     tet_mesh_boundary::rebuild_tets_from_split_boundary(
-        tet_points, tet_faces, face_tets, tet_indices, boundary_faces, std::move(boundary_vertices), boundary_mesh, face_parent_map
+        tet_points, tet_faces, face_tets, tet_indices, boundary_faces, std::move(boundary_vertices), boundary_mesh, face_parent_map, edge_parent_map, boundary_edge_tets
     );
 
     auto [tet_mesh, tets] = build_tet_mesh(tet_points, tet_indices, tet_faces, face_tets);

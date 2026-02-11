@@ -416,6 +416,11 @@ struct HalfedgeProp {
     double signpost_angle = 0.0;
     gpf::HalfedgeId path_prev{};
     gpf::HalfedgeId path_next{};
+
+    void unconnect() {
+        path_prev = {};
+        path_next = {};
+    }
 };
 
 using AuxiliaryMesh = gpf::ManifoldMesh<VertexProp, HalfedgeProp, EdgeProp, gpf::Empty>;
@@ -641,6 +646,8 @@ inline void FlipGeodesic::shorten_locally() {
             hid = mesh->he_twin(hid);
         }
     }
+    mesh->halfedge_prop(path_prev_hid).unconnect();
+    mesh->halfedge_prop(path_next_hid).unconnect();
     replace_path(std::move(new_path), path_prev_prev_hid, path_next_next_hid);
 }
 
@@ -688,9 +695,9 @@ inline bool FlipGeodesic::flip(const gpf::HalfedgeId hid) const {
     gpf::update_corner_angles_on_face(he_db.face());
 
     // edge bd counld't be boundary
-    he_bd.prop().signpost_angle = he_bc.prop().signpost_angle + he_bc.prop().angle;
+    he_bd.prop().signpost_angle = std::fmod(he_bc.prop().signpost_angle + he_bc.prop().angle, he_ab.to().prop().angle_sum);
     gpf::update_halfedge_vector(he_bd);
-    he_db.prop().signpost_angle = he_da.prop().signpost_angle + he_da.prop().angle;
+    he_db.prop().signpost_angle = std::fmod(he_da.prop().signpost_angle + he_da.prop().angle, he_cd.to().prop().angle_sum);
     gpf::update_halfedge_vector(he_db);
 
     // auto _a1 = std::fmod(he_ab.twin().prop().signpost_angle - he_bd.prop().angle, he_bd.from().prop().angle_sum);
@@ -934,6 +941,22 @@ void TracePolyline<N, Mesh>::add_intersection_point(double left_ori, double righ
 
 }
 
+template<typename Mesh>
+void write_mesh1(const std::string& name, const Mesh& mesh) {
+    std::ofstream out(name);
+    for (const auto v : mesh.vertices()) {
+        const auto& pt = v.prop().pt;
+        std::println(out, "v {} {} {}", pt[0], pt[1], pt[2]);
+    }
+    for (const auto f : mesh.faces()) {
+        std::print(out, "f");
+        for (const auto he : f.halfedges()) {
+            std::print(out, " {}", he.to().id.idx + 1);
+        }
+        std::println(out);
+    }
+}
+
 template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
 auto project_polylines_on_mesh(
     std::vector<std::array<double, 3>>& points,
@@ -946,6 +969,7 @@ auto project_polylines_on_mesh(
 
     constexpr double EPS = 1e-3;
     auto point_vertices = detail::project_points_on_mesh(points, mesh, EPS, face_parent_map, edge_parent_map);
+    write_mesh1("boundary.obj", mesh);
     detail::AuxiliaryMesh aux_mesh;
     aux_mesh.copy_from(mesh);
     gpf::update_edge_lengths<N>(aux_mesh, [mesh](auto v) {
@@ -983,6 +1007,9 @@ auto project_polylines_on_mesh(
         for (std::size_t i = 0; i + 1 < polyline.size(); i++) {
             auto va = point_vertices[polyline[i]];
             auto vb = point_vertices[polyline[i + 1]];
+            if (va.idx == 5748 && vb.idx == 5756) {
+                const auto a = 2;
+            }
             auto local_path =
                 flip_geodesic.perform(detail::shortest_patch_by_dijksta(aux_mesh, va, vb));
             for (const auto hid : std::move(local_path)) {

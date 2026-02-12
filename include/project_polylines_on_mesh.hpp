@@ -308,6 +308,7 @@ void triangulate_on_face(
 
     const auto triangle_indices = gpf::triangulate_polygon(points, segments, n_old_face_vertices, true);
     auto triangles = triangle_indices | views::transform([&face_vertices] (const auto idx) { return face_vertices[idx];}) | ranges::to<std::vector>();
+    assert(!triangles.empty());
 
     const auto n_faces_before = mesh.n_faces_capacity();
     mesh.split_face_into_triangles(fid, triangles);
@@ -425,9 +426,16 @@ struct HalfedgeProp {
 
 using AuxiliaryMesh = gpf::ManifoldMesh<VertexProp, HalfedgeProp, EdgeProp, gpf::Empty>;
 
-inline std::vector<gpf::HalfedgeId> shortest_patch_by_dijksta(const AuxiliaryMesh& mesh, const gpf::VertexId start_vid, const gpf::VertexId end_vid) {
+template<typename Mesh, typename IsLocked, typename GetEdgeLength>
+inline std::vector<gpf::HalfedgeId> shortest_patch_by_dijksta(
+    const Mesh& mesh,
+    const gpf::VertexId start_vid,
+    const gpf::VertexId end_vid,
+    IsLocked&& is_locked,
+    GetEdgeLength&& get_edge_length
+) {
     for (const auto he :  mesh.vertex(start_vid).outgoing_halfedges()) {
-        if (he.to().id == end_vid && !he.edge().prop().locked) {
+        if (he.to().id == end_vid && !is_locked(he.edge())) {
             return {he.id};
         }
     }
@@ -439,14 +447,14 @@ inline std::vector<gpf::HalfedgeId> shortest_patch_by_dijksta(const AuxiliaryMes
         return vid == start_vid || incomindg_halfedges_map.find(vid) != incomindg_halfedges_map.end();
     };
 
-    auto enqueue_vertex_neighbors = [&mesh, &vertex_used, &pq](const gpf::VertexId vid, double dist) {
+    auto enqueue_vertex_neighbors = [&mesh, &is_locked, &get_edge_length, &vertex_used, &pq](const gpf::VertexId vid, double dist) {
         for (const auto he : mesh.vertex(vid).outgoing_halfedges()) {
-            if (he.edge().prop().locked) {
+            if (is_locked(he.edge())) {
                 continue;
             }
             auto vb = he.to().id;
             if (!vertex_used(vb)) {
-                auto len = he.edge().prop().len;
+                auto len = get_edge_length(he.edge());
                 pq.emplace(dist + len, he.id);
             }
         }
@@ -1007,11 +1015,13 @@ auto project_polylines_on_mesh(
         for (std::size_t i = 0; i + 1 < polyline.size(); i++) {
             auto va = point_vertices[polyline[i]];
             auto vb = point_vertices[polyline[i + 1]];
-            if (va.idx == 5748 && vb.idx == 5756) {
+            if (va.idx == 5735 && vb.idx == 5734) {
                 const auto a = 2;
             }
             auto local_path =
-                flip_geodesic.perform(detail::shortest_patch_by_dijksta(aux_mesh, va, vb));
+                flip_geodesic.perform(detail::shortest_patch_by_dijksta(aux_mesh, va, vb,
+                    [](auto e) { return e.prop().locked; },
+                    [](auto e) { return e.prop().len; }));
             for (const auto hid : std::move(local_path)) {
                 trace.trace_from_vertex(hid);
             }
@@ -1075,12 +1085,32 @@ auto project_polylines_on_mesh(
         auto segment_vertices = segments | std::views::transform(get_vertex_id) | std::ranges::to<std::vector>();
         detail::triangulate_on_face(mesh, fid, {}, ccs, {}, segment_vertices, edge_point_vertices, face_parent_map);
     }
+    write_mesh1("after_triangulate.obj", mesh);
 
     return std::move(polyline_paths) | std::views::transform([&get_vertex_id, &mesh](auto&& path) {
         std::vector<gpf::HalfedgeId> halfedges;
         halfedges.reserve(path.size() - 1);
         for (std::size_t i = 0; i + 1 < path.size(); ++i) {
-            halfedges.push_back(mesh.he_from_vertices(get_vertex_id(path[i]), get_vertex_id(path[i + 1])));
+            const auto va = get_vertex_id(path[i]);
+            const auto vb = get_vertex_id(path[i + 1]);
+            if (va == vb) {
+                continue;
+            }
+            auto hid = mesh.he_from_vertices(va, vb);
+            if (hid.valid()) {
+                halfedges.emplace_back(hid);
+            } else {
+                halfedges.append_range(detail::shortest_patch_by_dijksta(
+                    mesh, va, vb,
+                    [] (auto e) { return false; },
+                    [] (auto e) {
+                        auto [v1, v2] = e.vertices();
+                        std::span<const double, N> p1{v1.prop().pt};
+                        std::span<const double, N> p2{v2.prop().pt};
+                        return std::sqrt(gpf::squared_distance(p1, p2));
+                    }
+                ));
+            }
         }
         return halfedges;
     }) | std::ranges::to<std::vector>();

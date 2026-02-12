@@ -516,35 +516,53 @@ void split_tets_by_face(
         parent_to_children[parent].push_back(fid);
     }
 
+    // Pre-compute per-split-face info (tet_idx, vd) before any mutation,
+    // then group by tet so each tet is processed exactly once.
+    struct SplitFaceInfo {
+        std::size_t vd; // the opposite vertex for this face
+        std::vector<gpf::FaceId> children;
+    };
+    std::unordered_map<std::size_t, std::vector<SplitFaceInfo>> tet_split_faces;
+
     for (auto& [parent_fid, children] : parent_to_children) {
         assert(children.size() > 1);
 
-        // Get the original tet face index
         auto boundary_face_idx = parent_fid.idx;
         auto tet_face_idx = boundary_faces[boundary_face_idx];
 
-        // Get the tet that owns this boundary face (only one tet for boundary faces)
         auto tet_idx = face_tets[tet_face_idx][0];
         assert(tet_idx != gpf::kInvalidIndex);
 
-        // Get the 4th vertex (d) that's not on the boundary face
+        // Compute vd from the *unmodified* tets array
         const auto& boundary_face = tet_faces[tet_face_idx];
-        const auto vd = *ranges::find_if(tets[tet_idx], [&boundary_face](const auto idx) { return idx != boundary_face[0] && idx != boundary_face[1] && idx != boundary_face[2]; });
+        const auto vd = *ranges::find_if(tets[tet_idx], [&boundary_face](const auto idx) {
+            return idx != boundary_face[0] && idx != boundary_face[1] && idx != boundary_face[2];
+        });
 
-        // For each sub-face, create a new tet (a, b, c, d) -> sub-tets
-        auto build_new_tet = [vd, &boundary_mesh, &boundary_to_tet_vertex] (std::array<std::size_t, 4>& tet_indices, const gpf::FaceId fid) {
-            for(auto&& [idx, he] : views::zip(tet_indices, boundary_mesh.face(fid).halfedges())) {
-                idx = boundary_to_tet_vertex[he.to().id.idx];
-            }
-            tet_indices[3] = vd;
-        };
-        for (auto child_fid : children) {
-            if (child_fid == parent_fid) {
-                build_new_tet(tets[tet_idx], child_fid);
-            } else {
-                std::array<std::size_t, 4> new_tet;
-                build_new_tet(new_tet, child_fid);
-                tets.emplace_back(std::move(new_tet));
+        tet_split_faces[tet_idx].push_back(SplitFaceInfo{vd, std::move(children)});
+    }
+
+    // Now process each tet exactly once
+    auto build_new_tet = [&boundary_mesh, &boundary_to_tet_vertex] (std::array<std::size_t, 4>& tet_indices, const gpf::FaceId fid, std::size_t vd) {
+        for(auto&& [idx, he] : views::zip(tet_indices, boundary_mesh.face(fid).halfedges())) {
+            idx = boundary_to_tet_vertex[he.to().id.idx];
+        }
+        tet_indices[3] = vd;
+    };
+
+    for (auto& [tet_idx, split_faces] : tet_split_faces) {
+        bool first_sub_tet = true;
+        for (auto& info : split_faces) {
+            for (auto child_fid : info.children) {
+                if (first_sub_tet) {
+                    // Reuse the original tet slot for the very first sub-tet
+                    build_new_tet(tets[tet_idx], child_fid, info.vd);
+                    first_sub_tet = false;
+                } else {
+                    std::array<std::size_t, 4> new_tet;
+                    build_new_tet(new_tet, child_fid, info.vd);
+                    tets.emplace_back(std::move(new_tet));
+                }
             }
         }
     }

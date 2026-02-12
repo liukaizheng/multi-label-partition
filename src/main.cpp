@@ -15,6 +15,7 @@
 #include <array>
 #include <boost/functional/hash.hpp>
 
+#include <deque>
 #include <gpf/manifold_mesh.hpp>
 #include <gpf/mesh.hpp>
 #include <mshio/mshio.h>
@@ -177,9 +178,25 @@ void write_faces(const std::string& name, const Mesh& mesh, const std::span<cons
     }
 }
 
-struct ColorRegionBoundaryPart {
-    std::size_t color1;
-    std::size_t color2;
+template<typename Mesh>
+void write_faces(const std::string& name, const Mesh& mesh, const std::vector<std::array<double, 3>>& points, const std::span<const gpf::FaceId> faces) {
+    std::ofstream out(name);
+    for (const auto& pt : points) {
+        std::println(out, "v {} {} {}", pt[0], pt[1], pt[2]);
+    }
+    for (const auto fid : faces) {
+        std::print(out, "f");
+        auto f = mesh.face(fid);
+        for (const auto he : f.halfedges()) {
+            std::print(out, " {}", he.to().id.idx + 1);
+        }
+        std::println(out);
+    }
+}
+
+struct RegionBoundaryPart {
+    std::size_t region1;
+    std::size_t region2;
     std::vector<std::size_t> indices;
 };
 
@@ -189,15 +206,66 @@ auto extract_color_boundaries(
     std::vector<std::vector<gpf::FaceId>> color_face_groups
 )  {
 
-    std::vector<std::size_t> face_color_indices(faces.size());
+    struct EdgeProp {
+        bool is_boundary = false;
+    };
+    struct FaceProp {
+        std::size_t color_index;
+        std::size_t region_index = gpf::kInvalidIndex;
+    };
+
+    using Mesh = gpf::ManifoldMesh<gpf::Empty, gpf::Empty, EdgeProp, FaceProp>;
+    auto mesh = Mesh::new_in(faces);
     for (std::size_t i = 0; i < color_face_groups.size(); i++) {
         for (const auto fid : color_face_groups[i]) {
-            face_color_indices[fid.idx] = i;
+            mesh.face_prop(fid).color_index = i;
+        }
+    }
+    for (auto edge : mesh.edges()) {
+        auto ha = edge.halfedge();
+        auto fa = ha.face();
+        auto fb = ha.twin().face();
+        if (fa.prop().color_index != fb.prop().color_index) {
+            edge.prop().is_boundary = true;
         }
     }
 
-    using Mesh = gpf::ManifoldMesh<gpf::Empty, gpf::Empty, gpf::Empty, gpf::Empty>;
-    auto mesh = Mesh::new_in(faces);
+    std::vector<std::size_t> region_colors;
+    for (auto face : mesh.faces()) {
+        if (face.prop().region_index != gpf::kInvalidIndex) {
+            continue;
+        }
+        const auto region_index = region_colors.size();
+        face.prop().region_index = region_index;
+        region_colors.push_back(face.prop().color_index);
+        std::deque<gpf::FaceId> queue{face.id};
+        while (!queue.empty()) {
+            auto curr_fid = queue.front();
+            queue.pop_front();
+            for (auto he: mesh.face(curr_fid).halfedges()) {
+                if (he.edge().prop().is_boundary) {
+                    continue;
+                }
+                auto adj_face = he.twin().face();
+                auto& adj_face_prop = adj_face.prop();
+                if (adj_face_prop.region_index != gpf::kInvalidIndex) {
+                    continue;
+                }
+                adj_face_prop.region_index = region_index;
+                queue.push_back(adj_face.id);
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < region_colors.size(); i++) {
+        auto region_faces = mesh.faces() | views::filter([&](const auto& face) {
+            return face.prop().region_index == i;
+        }) | views::transform([](const auto& face) {
+            return face.id;
+        }) | ranges::to<std::vector<gpf::FaceId>>();
+        write_faces(std::format("region_{}.obj", i), mesh, points, region_faces);
+    }
+
     auto hash = [](const std::pair<std::size_t, std::size_t>& key) {
         return boost::hash_value(key);
     };
@@ -205,15 +273,17 @@ auto extract_color_boundaries(
     for (auto e : mesh.edges()) {
         auto he = e.halfedge();
         auto he_twin = he.twin();
-        auto f1 = he.face().id.idx;
-        auto f2 = he_twin.face().id.idx;
-        auto color_idx1 = face_color_indices[f1];
-        auto color_idx2 = face_color_indices[f2];
-        if (color_idx1 != color_idx2) {
-            if (color_idx1 < color_idx2) {
-                boundary_halfedges_map[std::make_pair(color_idx1, color_idx2)].emplace_back(he.id);
+        auto f1 = he.face();
+        auto f2 = he_twin.face();
+        auto region_idx1 = f1.prop().region_index;
+        auto region_idx2 = f2.prop().region_index;
+        if (region_idx1 != region_idx2) {
+            // because the input mesh is oriented outward, but the boundary mesh of tetrahedron is oriented inward
+            // we need to record the reversed halfedges
+            if (region_idx1 < region_idx2) {
+                boundary_halfedges_map[std::make_pair(region_idx1, region_idx2)].emplace_back(he_twin.id);
             } else {
-                boundary_halfedges_map[std::make_pair(color_idx2, color_idx1)].emplace_back(he_twin.id);
+                boundary_halfedges_map[std::make_pair(region_idx2, region_idx1)].emplace_back(he.id);
             }
         }
     }
@@ -245,11 +315,10 @@ auto extract_color_boundaries(
             curr_v = he.to();
         }
     };
-
     std::vector<gpf::VertexId> outline_vertices;
     std::vector<std::size_t> vertex_map(mesh.n_vertices_capacity(), gpf::kInvalidIndex);
 
-    std::vector<ColorRegionBoundaryPart> boundary_parts;
+    std::vector<RegionBoundaryPart> boundary_parts;
     boundary_parts.reserve(boundary_halfedges_map.size());
     for (auto&& [pair, halfedges] : boundary_halfedges_map) {
         sort_halfedges(halfedges);
@@ -269,16 +338,17 @@ auto extract_color_boundaries(
         for (const auto hid : halfedges) {
             boundary_part.emplace_back(vertex_map[mesh.halfedge(hid).to().id.idx]);
         }
-        boundary_parts.emplace_back(ColorRegionBoundaryPart{
-            .color1 = pair.first,
-            .color2 = pair.second,
+        boundary_parts.emplace_back(RegionBoundaryPart{
+            .region1 = pair.first,
+            .region2 = pair.second,
             .indices = std::move(boundary_part)
         });
     }
 
     return std::make_tuple(
         outline_vertices | views::transform([&points] (const auto vid) { return points[vid.idx]; }) | ranges::to<std::vector>(),
-        std::move(boundary_parts)
+        std::move(boundary_parts),
+        std::move(region_colors)
     );
 }
 
@@ -288,7 +358,7 @@ struct VertexProp {
 };
 
 struct FaceProp {
-    std::size_t color_index = gpf::kInvalidIndex;
+    std::size_t region_index = gpf::kInvalidIndex;
 };
 
 using Mesh = gpf::ManifoldMesh<VertexProp, gpf::Empty, gpf::Empty, FaceProp>;
@@ -605,9 +675,9 @@ auto rebuild_tets_from_split_boundary(
     split_tets_by_edge(tets, boundary_to_tet_vertex, boundary_mesh, edge_parent_map, boundary_edge_tets);
 }
 
-void mark_face_colors(
+void mark_face_region(
     const std::vector<std::vector<gpf::HalfedgeId>>& path_halfedges,
-    const std::vector<ColorRegionBoundaryPart>& outline_parts,
+    const std::vector<RegionBoundaryPart>& outline_parts,
     Mesh& mesh
 ) {
     // Seed face colors from boundary halfedges
@@ -619,12 +689,12 @@ void mark_face_colors(
             auto he = mesh.halfedge(hid);
             auto f1 = he.face();
             auto f2 = he.twin().face();
-            if (f1.prop().color_index == gpf::kInvalidIndex) {
-                f1.prop().color_index = part.color1;
+            if (f1.prop().region_index == gpf::kInvalidIndex) {
+                f1.prop().region_index = part.region1;
                 queue.push(f1.id);
             }
-            if (f2.prop().color_index == gpf::kInvalidIndex) {
-                f2.prop().color_index = part.color2;
+            if (f2.prop().region_index == gpf::kInvalidIndex) {
+                f2.prop().region_index = part.region2;
                 queue.push(f2.id);
             }
         }
@@ -635,11 +705,11 @@ void mark_face_colors(
         auto fid = queue.front();
         queue.pop();
         auto f = mesh.face(fid);
-        auto color = f.prop().color_index;
+        auto region = f.prop().region_index;
         for (auto he : f.halfedges()) {
             auto neighbor = he.twin().face();
-            if (neighbor.prop().color_index == gpf::kInvalidIndex) {
-                neighbor.prop().color_index = color;
+            if (neighbor.prop().region_index == gpf::kInvalidIndex) {
+                neighbor.prop().region_index = region;
                 queue.push(neighbor.id);
             }
         }
@@ -648,7 +718,7 @@ void mark_face_colors(
 
 void project_outline_parts(
     std::vector<std::array<double, 3>>& outline_points,
-    const std::vector<ColorRegionBoundaryPart>& outline_parts,
+    const std::vector<RegionBoundaryPart>& outline_parts,
     Mesh& mesh,
     std::unordered_map<gpf::FaceId, gpf::FaceId>& face_parent_map,
     std::unordered_map<gpf::EdgeId, gpf::EdgeId>& edge_parent_map
@@ -663,7 +733,7 @@ void project_outline_parts(
         &edge_parent_map
     );
 
-    mark_face_colors(path_halfedges, outline_parts, mesh);
+    mark_face_region(path_halfedges, outline_parts, mesh);
 }
 
 }
@@ -796,12 +866,12 @@ auto build_triangle_groups(
 ) {
     std::vector<std::vector<Triangle>> triangle_groups(n_materials);
     for (const auto face : mesh.faces()) {
-        const auto color_idx = face.prop().color_index;
+        const auto region_idx = face.prop().region_index;
             auto pts = face.halfedges() | views::transform([](auto he) {
                 const auto& pt = he.to().prop().pt;
                 return Point_3(pt[0], pt[1], pt[2]);
             }) | ranges::to<std::vector>();
-        triangle_groups[color_idx].emplace_back(std::move(pts[0]), std::move(pts[1]), std::move(pts[2]));
+        triangle_groups[region_idx].emplace_back(std::move(pts[0]), std::move(pts[1]), std::move(pts[2]));
     }
     return triangle_groups;
 }
@@ -904,12 +974,21 @@ int main(int argc, char* argv[]) {
     auto [points, faces, label_face_groups] = read_colored_mesh(mesh_path);
     auto [tet_points, tet_indices] = read_msh(msh_path);
 
-    auto [outline_points, outline_parts] = extract_color_boundaries(points, faces, label_face_groups);
+    auto [outline_points, outline_parts, region_colors] = extract_color_boundaries(points, faces, label_face_groups);
     auto [tet_faces, face_tets, boundary_vertices, boundary_faces, boundary_mesh, boundary_edge_tets] = tet_mesh_boundary::extract_boundary_from_tets(tet_points, tet_indices);
     std::unordered_map<gpf::FaceId, gpf::FaceId> face_parent_map;
     std::unordered_map<gpf::EdgeId, gpf::EdgeId> edge_parent_map;
     tet_mesh_boundary::project_outline_parts(outline_points, outline_parts, boundary_mesh, face_parent_map, edge_parent_map);
-    write_mesh("fine.obj", boundary_mesh);
+    {
+        for (std::size_t i = 0; i < region_colors.size(); ++i) {
+            auto region_faces = boundary_mesh.faces() | views::filter([i] (auto f) { return f.prop().region_index == i;}) |
+                views::transform([](auto f) { return f.id; }) |
+                ranges::to<std::vector>();
+                write_faces(std::format("region_{}.obj", i), boundary_mesh, region_faces);
+        }
+        write_mesh("fine.obj", boundary_mesh);
+
+    }
 
     // Rebuild tets from split boundary faces and edges
     tet_mesh_boundary::rebuild_tets_from_split_boundary(
@@ -918,7 +997,7 @@ int main(int argc, char* argv[]) {
 
     auto [tet_mesh, tets] = build_tet_mesh(tet_points, tet_indices, tet_faces, face_tets);
     // auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
-    auto triangle_groups = build_triangle_groups(boundary_mesh, label_face_groups.size());
+    auto triangle_groups = build_triangle_groups(boundary_mesh, region_colors.size());
     write_msh("123.obj", tet_mesh);
     write_tet_msh("output.msh", tet_points, tet_indices);
 

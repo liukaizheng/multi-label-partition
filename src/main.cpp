@@ -502,6 +502,7 @@ auto extract_boundary_from_tets(
 }
 
 void split_tets_by_face(
+    std::vector<std::array<double, 3>>& tet_points,
     const std::vector<std::array<std::size_t, 3>>& tet_faces,
     const std::vector<std::array<std::size_t, 2>>& face_tets,
     std::vector<std::array<std::size_t, 4>>& tets,
@@ -516,8 +517,8 @@ void split_tets_by_face(
         parent_to_children[parent].push_back(fid);
     }
 
-    // Pre-compute per-split-face info (tet_idx, vd) before any mutation,
-    // then group by tet so each tet is processed exactly once.
+    // Pre-compute per-split-face info before any mutation,
+    // grouped by tet so each tet is processed exactly once.
     struct SplitFaceInfo {
         std::size_t vd; // the opposite vertex for this face
         std::vector<gpf::FaceId> children;
@@ -542,27 +543,91 @@ void split_tets_by_face(
         tet_split_faces[tet_idx].push_back(SplitFaceInfo{vd, std::move(children)});
     }
 
-    // Now process each tet exactly once
-    auto build_new_tet = [&boundary_mesh, &boundary_to_tet_vertex] (std::array<std::size_t, 4>& tet_indices, const gpf::FaceId fid, std::size_t vd) {
+    // Helper: build a sub-tet from a boundary mesh sub-face + an apex vertex
+    auto build_sub_tet = [&boundary_mesh, &boundary_to_tet_vertex] (std::array<std::size_t, 4>& tet_indices, const gpf::FaceId fid, std::size_t apex) {
         for(auto&& [idx, he] : views::zip(tet_indices, boundary_mesh.face(fid).halfedges())) {
             idx = boundary_to_tet_vertex[he.to().id.idx];
         }
-        tet_indices[3] = vd;
+        tet_indices[3] = apex;
     };
 
     for (auto& [tet_idx, split_faces] : tet_split_faces) {
-        bool first_sub_tet = true;
-        for (auto& info : split_faces) {
+        if (split_faces.size() == 1) {
+            // Single split face: fan from opposite vertex (no Steiner point needed)
+            auto& info = split_faces[0];
+            bool first = true;
             for (auto child_fid : info.children) {
-                if (first_sub_tet) {
-                    // Reuse the original tet slot for the very first sub-tet
-                    build_new_tet(tets[tet_idx], child_fid, info.vd);
-                    first_sub_tet = false;
+                if (first) {
+                    build_sub_tet(tets[tet_idx], child_fid, info.vd);
+                    first = false;
                 } else {
                     std::array<std::size_t, 4> new_tet;
-                    build_new_tet(new_tet, child_fid, info.vd);
+                    build_sub_tet(new_tet, child_fid, info.vd);
                     tets.emplace_back(std::move(new_tet));
                 }
+            }
+        } else {
+            // Multiple split faces: insert centroid as Steiner point and fan from it
+            // to all boundary sub-triangles AND unsplit faces of this tet.
+            const auto orig_tet = tets[tet_idx]; // copy before mutation
+            std::array<double, 3> centroid{};
+            for (std::size_t i = 0; i < 4; i++) {
+                const auto& p = tet_points[orig_tet[i]];
+                centroid[0] += p[0];
+                centroid[1] += p[1];
+                centroid[2] += p[2];
+            }
+            centroid[0] *= 0.25;
+            centroid[1] *= 0.25;
+            centroid[2] *= 0.25;
+            auto centroid_idx = tet_points.size();
+            tet_points.emplace_back(centroid);
+
+            // Collect the set of original tet vertices that are opposite to split faces
+            // to identify which of the 4 tet faces are NOT split.
+            // Each face of a tet is defined by 3 of its 4 vertices; the face opposite
+            // vertex v contains the other 3 vertices. So a split face with vd=v means
+            // the face containing {all vertices except v} is split.
+            std::unordered_set<std::size_t> split_opposite_vertices;
+            for (const auto& info : split_faces) {
+                split_opposite_vertices.insert(info.vd);
+            }
+
+            bool first = true;
+
+            // Fan centroid to each split boundary face's sub-triangles
+            for (auto& info : split_faces) {
+                for (auto child_fid : info.children) {
+                    if (first) {
+                        build_sub_tet(tets[tet_idx], child_fid, centroid_idx);
+                        first = false;
+                    } else {
+                        std::array<std::size_t, 4> new_tet;
+                        build_sub_tet(new_tet, child_fid, centroid_idx);
+                        tets.emplace_back(std::move(new_tet));
+                    }
+                }
+            }
+
+            // Fan centroid to each unsplit face of the tet.
+            // The 4 faces of tet [v0,v1,v2,v3] are opposite to v0,v1,v2,v3 respectively.
+            // A face is unsplit if its opposite vertex is NOT in split_opposite_vertices.
+            constexpr std::array<std::array<std::size_t, 3>, 4> LOCAL_FACE_VERTICES = {{
+                {1, 2, 3}, // face opposite vertex 0
+                {0, 2, 3}, // face opposite vertex 1
+                {0, 1, 3}, // face opposite vertex 2
+                {0, 1, 2}, // face opposite vertex 3
+            }};
+            for (std::size_t local_v = 0; local_v < 4; local_v++) {
+                if (split_opposite_vertices.count(orig_tet[local_v])) {
+                    continue; // this face is split, already handled above
+                }
+                const auto& lf = LOCAL_FACE_VERTICES[local_v];
+                assert(!first); // at least one split face was processed
+                std::array<std::size_t, 4> new_tet = {
+                    orig_tet[lf[0]], orig_tet[lf[1]], orig_tet[lf[2]], centroid_idx
+                };
+                tets.emplace_back(std::move(new_tet));
             }
         }
     }
@@ -689,7 +754,7 @@ auto rebuild_tets_from_split_boundary(
         tet_points.emplace_back(boundary_mesh.vertex_prop(gpf::VertexId{i}).pt);
     }
 
-    split_tets_by_face(tet_faces, face_tets, tets, boundary_faces, boundary_to_tet_vertex, boundary_mesh, face_parent_map);
+    split_tets_by_face(tet_points, tet_faces, face_tets, tets, boundary_faces, boundary_to_tet_vertex, boundary_mesh, face_parent_map);
     split_tets_by_edge(tets, boundary_to_tet_vertex, boundary_mesh, edge_parent_map, boundary_edge_tets);
 }
 

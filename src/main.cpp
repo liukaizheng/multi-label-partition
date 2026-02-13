@@ -288,7 +288,25 @@ auto extract_color_boundaries(
         }
     }
 
-    auto sort_halfedges = [&mesh](std::vector<gpf::HalfedgeId>& halfedges) {
+    auto propagate_halfedges = [&mesh](const gpf::VertexId start_vid, const std::unordered_set<gpf::VertexId>& vertex_set) {
+        gpf::VertexId prev_vid{};
+        auto curr_v = mesh.vertex(start_vid);
+        std::vector<gpf::HalfedgeId> result {};
+        while (true) {
+            auto he = curr_v.halfedge();
+            auto next_v = he.to();
+            if (next_v.id == prev_vid || next_v.id == start_vid || !vertex_set.contains(next_v.id)) {
+                break;
+            } else {
+                result.emplace_back(he.id);
+                prev_vid = curr_v.id;
+                curr_v = next_v;
+            }
+        }
+        return result;
+    };
+
+    auto sort_halfedges = [&propagate_halfedges, &mesh](std::vector<gpf::HalfedgeId>& halfedges) {
         std::unordered_set<gpf::VertexId> vertex_set(halfedges.size());
         for (const auto hid : halfedges) {
             auto he = mesh.halfedge(hid);
@@ -297,32 +315,28 @@ auto extract_color_boundaries(
             va.data().halfedge = he.id;
             vertex_set.emplace(vb.id);
         }
-        gpf::VertexId start_vid{};
+        std::vector<gpf::VertexId> start_vertices{};
         for (const auto hid : halfedges) {
             auto vid = mesh.halfedge(hid).from().id;
             if (!vertex_set.contains(vid)) {
-                start_vid = vid;
-                break;
+                start_vertices.emplace_back(vid);
             }
         }
-        if (!start_vid.valid()) {
-            start_vid = mesh.halfedge(halfedges.front()).to().id;
+        if (start_vertices.empty()) {
+            start_vertices.push_back(mesh.halfedge(halfedges.front()).to().id);
         }
-        auto curr_v = mesh.vertex(start_vid);
-        for (std::size_t i = 0; i < halfedges.size(); ++i) {
-            auto he = curr_v.halfedge();
-            halfedges[i] = he.id;
-            curr_v = he.to();
-        }
+
+        return start_vertices |views::transform([&propagate_halfedges, &vertex_set](gpf::VertexId vid) {
+            return propagate_halfedges(vid, vertex_set);
+        }) | ranges::to<std::vector>();
     };
     std::vector<gpf::VertexId> outline_vertices;
     std::vector<std::size_t> vertex_map(mesh.n_vertices_capacity(), gpf::kInvalidIndex);
 
     std::vector<RegionBoundaryPart> boundary_parts;
     boundary_parts.reserve(boundary_halfedges_map.size());
-    for (auto&& [pair, halfedges] : boundary_halfedges_map) {
-        sort_halfedges(halfedges);
-        for (const auto hid : halfedges) {
+    for (auto&& [pair, all_halfedges] : boundary_halfedges_map) {
+        for (const auto hid : all_halfedges) {
             auto he = mesh.halfedge(hid);
             for (const auto vid : {he.from().id, he.to().id}) {
                 if (vertex_map[vid.idx] == gpf::kInvalidIndex) {
@@ -331,18 +345,19 @@ auto extract_color_boundaries(
                 }
             }
         }
-
-        std::vector<std::size_t> boundary_part;
-        boundary_part.reserve(halfedges.size() + 1);
-        boundary_part.push_back(vertex_map[mesh.halfedge(halfedges.front()).from().id.idx]);
-        for (const auto hid : halfedges) {
-            boundary_part.emplace_back(vertex_map[mesh.halfedge(hid).to().id.idx]);
+        for (auto&& halfedges: sort_halfedges(all_halfedges)) {
+            std::vector<std::size_t> boundary_part;
+            boundary_part.reserve(halfedges.size() + 1);
+            boundary_part.push_back(vertex_map[mesh.halfedge(halfedges.front()).from().id.idx]);
+            for (const auto hid : halfedges) {
+                boundary_part.emplace_back(vertex_map[mesh.halfedge(hid).to().id.idx]);
+            }
+            boundary_parts.emplace_back(RegionBoundaryPart{
+                .region1 = pair.first,
+                .region2 = pair.second,
+                .indices = std::move(boundary_part)
+            });
         }
-        boundary_parts.emplace_back(RegionBoundaryPart{
-            .region1 = pair.first,
-            .region2 = pair.second,
-            .indices = std::move(boundary_part)
-        });
     }
 
     return std::make_tuple(
@@ -520,7 +535,7 @@ void split_tets_by_face(
     // Pre-compute per-split-face info before any mutation,
     // grouped by tet so each tet is processed exactly once.
     struct SplitFaceInfo {
-        std::size_t vd; // the opposite vertex for this face
+        std::size_t local_vd_idx; // the opposite vertex for this face
         std::vector<gpf::FaceId> children;
     };
     std::unordered_map<std::size_t, std::vector<SplitFaceInfo>> tet_split_faces;
@@ -531,16 +546,17 @@ void split_tets_by_face(
         auto boundary_face_idx = parent_fid.idx;
         auto tet_face_idx = boundary_faces[boundary_face_idx];
 
-        auto tet_idx = face_tets[tet_face_idx][0];
+        const auto tet_idx = face_tets[tet_face_idx][0];
         assert(tet_idx != gpf::kInvalidIndex);
+        const auto& tet = tets[tet_idx];
 
         // Compute vd from the *unmodified* tets array
         const auto& boundary_face = tet_faces[tet_face_idx];
-        const auto vd = *ranges::find_if(tets[tet_idx], [&boundary_face](const auto idx) {
-            return idx != boundary_face[0] && idx != boundary_face[1] && idx != boundary_face[2];
+        const auto local_vd_idx = *ranges::find_if(ranges::iota_view{std::size_t{0}, std::size_t{4}}, [&boundary_face, &tet](const auto idx) {
+            return tet[idx] != boundary_face[0] && tet[idx] != boundary_face[1] && tet[idx] != boundary_face[2];
         });
 
-        tet_split_faces[tet_idx].push_back(SplitFaceInfo{vd, std::move(children)});
+        tet_split_faces[tet_idx].push_back(SplitFaceInfo{local_vd_idx, std::move(children)});
     }
 
     // Helper: build a sub-tet from a boundary mesh sub-face + an apex vertex
@@ -551,52 +567,45 @@ void split_tets_by_face(
         tet_indices[3] = apex;
     };
 
-    for (auto& [tet_idx, split_faces] : tet_split_faces) {
+    for (const auto& [tet_idx, split_faces] : tet_split_faces) {
         if (split_faces.size() == 1) {
             // Single split face: fan from opposite vertex (no Steiner point needed)
-            auto& info = split_faces[0];
-            bool first = true;
-            for (auto child_fid : info.children) {
-                if (first) {
-                    build_sub_tet(tets[tet_idx], child_fid, info.vd);
-                    first = false;
-                } else {
-                    std::array<std::size_t, 4> new_tet;
-                    build_sub_tet(new_tet, child_fid, info.vd);
-                    tets.emplace_back(std::move(new_tet));
-                }
+            const auto& info = split_faces[0];
+            auto& tet = tets[tet_idx];
+            const auto vd = tet[info.local_vd_idx];
+
+            build_sub_tet(tet, info.children[0], vd);
+            for (std::size_t i = 1; i < info.children.size(); ++i) {
+                std::array<std::size_t, 4> new_tet;
+                build_sub_tet(new_tet, info.children[i], vd);
+                tets.push_back(std::move(new_tet));
             }
         } else {
             // Multiple split faces: insert centroid as Steiner point and fan from it
             // to all boundary sub-triangles AND unsplit faces of this tet.
             const auto orig_tet = tets[tet_idx]; // copy before mutation
             std::array<double, 3> centroid{};
+            auto eigen_centroid = Eigen::Vector3d::Map(centroid.data());
             for (std::size_t i = 0; i < 4; i++) {
-                const auto& p = tet_points[orig_tet[i]];
-                centroid[0] += p[0];
-                centroid[1] += p[1];
-                centroid[2] += p[2];
+                eigen_centroid += Eigen::Vector3d::Map(tet_points[orig_tet[i]].data());
             }
-            centroid[0] *= 0.25;
-            centroid[1] *= 0.25;
-            centroid[2] *= 0.25;
+            eigen_centroid *= 0.25;
+
             auto centroid_idx = tet_points.size();
             tet_points.emplace_back(centroid);
 
-            // Collect the set of original tet vertices that are opposite to split faces
-            // to identify which of the 4 tet faces are NOT split.
+            // Identify which of the 4 tet faces are NOT split.
             // Each face of a tet is defined by 3 of its 4 vertices; the face opposite
             // vertex v contains the other 3 vertices. So a split face with vd=v means
             // the face containing {all vertices except v} is split.
-            std::unordered_set<std::size_t> split_opposite_vertices;
+            std::array<bool, 4> local_face_is_split{{false, false, false, false}};
             for (const auto& info : split_faces) {
-                split_opposite_vertices.insert(info.vd);
+                local_face_is_split[info.local_vd_idx] = true;
             }
 
             bool first = true;
-
             // Fan centroid to each split boundary face's sub-triangles
-            for (auto& info : split_faces) {
+            for (const auto& info : split_faces) {
                 for (auto child_fid : info.children) {
                     if (first) {
                         build_sub_tet(tets[tet_idx], child_fid, centroid_idx);
@@ -611,23 +620,20 @@ void split_tets_by_face(
 
             // Fan centroid to each unsplit face of the tet.
             // The 4 faces of tet [v0,v1,v2,v3] are opposite to v0,v1,v2,v3 respectively.
-            // A face is unsplit if its opposite vertex is NOT in split_opposite_vertices.
+            // A face is unsplit if its opposite vertex is NOT in local_face_is_split.
             constexpr std::array<std::array<std::size_t, 3>, 4> LOCAL_FACE_VERTICES = {{
-                {1, 2, 3}, // face opposite vertex 0
+                {2, 1, 3}, // face opposite vertex 0
                 {0, 2, 3}, // face opposite vertex 1
-                {0, 1, 3}, // face opposite vertex 2
+                {1, 0, 3}, // face opposite vertex 2
                 {0, 1, 2}, // face opposite vertex 3
             }};
             for (std::size_t local_v = 0; local_v < 4; local_v++) {
-                if (split_opposite_vertices.count(orig_tet[local_v])) {
+                if (local_face_is_split[local_v]) {
                     continue; // this face is split, already handled above
                 }
                 const auto& lf = LOCAL_FACE_VERTICES[local_v];
                 assert(!first); // at least one split face was processed
-                std::array<std::size_t, 4> new_tet = {
-                    orig_tet[lf[0]], orig_tet[lf[1]], orig_tet[lf[2]], centroid_idx
-                };
-                tets.emplace_back(std::move(new_tet));
+                tets.push_back({orig_tet[lf[0]], orig_tet[lf[1]], orig_tet[lf[2]], centroid_idx});
             }
         }
     }

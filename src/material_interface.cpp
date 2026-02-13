@@ -251,7 +251,7 @@ void merge_collinear_edges_on_face(Mesh& mesh, auto& merge_halfedges_map, const 
     auto face_halfedges = face.halfedges();
     auto fh = *std::ranges::find_if(face_halfedges, [](const auto h) {
         auto prev = h.prev();
-        return prev.edge().data().property.parent != h.edge().data().property.parent;
+        return prev.edge().prop().parent != h.edge().prop().parent;
     });
 
     auto start_vid = fh.from().id;
@@ -259,7 +259,7 @@ void merge_collinear_edges_on_face(Mesh& mesh, auto& merge_halfedges_map, const 
     std::vector<gpf::HalfedgeId> halfedges;
     bool first = true;
     while(true) {
-        auto curr_parent = fh.edge().data().property.parent;
+        auto curr_parent = fh.edge().prop().parent;
         if (halfedges.empty()) {
             parent = curr_parent;
             halfedges.emplace_back(fh.id);
@@ -285,7 +285,7 @@ void merge_collinear_edges_on_face(Mesh& mesh, auto& merge_halfedges_map, const 
                     auto it = merge_halfedges_map.find(key);
                     gpf::EdgeId merged_eid{};
                     if (it == merge_halfedges_map.end()) {
-                        merge_halfedges_map[key] = {{hb.id, hb.id }};
+                        merge_halfedges_map[key] = {hb.id, hb.id };
                         auto eb = hb.edge();
                         merged_eid = eb.id;
                         eb.data().halfedge = hb.id;
@@ -438,6 +438,7 @@ void MaterialInterface::merge_negative_cell_faces() noexcept {
     }
 
     for (auto [ha, hb] : std::move(merge_halfedges_map) | views::values) {
+        // set the sibling of ha as hb was done in `merge_collinear_edges_on_face`
         mesh.halfedge(hb).data().sibling = ha;
     }
 
@@ -482,7 +483,7 @@ void MaterialInterface::merge_negative_cell_faces() noexcept {
             if (prev_edge_deleted && delete_edge && check_vertex_is_deleted(prev_vid)){
                 mesh.delete_vertex(prev_vid);
             } else if (prev_vid.valid()) {
-                delete_incoming_next(mesh, prev_hid);
+                mesh.vertex_data(prev_vid).halfedge = mesh.he_next(delete_incoming_next(mesh, prev_hid));
             }
 
             prev_vid = curr_vid;
@@ -492,7 +493,7 @@ void MaterialInterface::merge_negative_cell_faces() noexcept {
         if (prev_edge_deleted && first_edge_deleted && check_vertex_is_deleted(prev_vid)) {
             mesh.delete_vertex(prev_vid);
         } else {
-            delete_incoming_next(mesh, prev_hid);
+            mesh.vertex_data(prev_vid).halfedge = mesh.he_next(delete_incoming_next(mesh, prev_hid));
         }
         mesh.delete_face(fid);
     }
@@ -1230,7 +1231,7 @@ void do_material_interface(
 
         const auto& tvs = tet.vertices;
         if (ranges::count_if(tvs, [](const auto vid) {
-            return vid.idx == 5302 || vid.idx == 40349 || vid.idx == 40347 || vid.idx == 10644;
+            return vid.idx == 37487 || vid.idx == 138 || vid.idx == 60049 || vid.idx == 49258;
         }) >= 3) {
             const auto a = 2;
             save_tet(tid - 1, tets, tet_mesh);

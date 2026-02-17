@@ -503,6 +503,15 @@ auto extract_boundary_from_tets(
         }
     };
     for (auto e : boundary_mesh.edges()) {
+        auto [va, vb] = boundary_mesh.e_vertices(e.id);
+        auto v1 = boundary_mesh_vertices[va.idx];
+        auto v2 = boundary_mesh_vertices[vb.idx];
+        if (v1 > v2) {
+            std::swap(v1, v2);
+        }
+        if (v1 == 1234 && v2 == 25944) {
+            const auto a = 2;
+        }
         add_tets_into_map(e.id);
     }
 
@@ -693,6 +702,9 @@ void split_tets_by_edge(
 
             auto e_va = boundary_to_tet_vertex[boundary_mesh.he_from(chain.front()).idx];
             auto e_vb = boundary_to_tet_vertex[boundary_mesh.he_to(chain.back()).idx];
+            if (tet_idx == 345615) {
+                const auto a = 2;
+            }
 
 
             // Find the two vertices of this tet that are on the edge, and the other two
@@ -927,29 +939,6 @@ auto read_msh(const std::string& file_name) {
 }
 
 auto build_triangle_groups(
-    const std::vector<std::array<double, 3>>& points,
-    const std::vector<std::vector<std::size_t>>& faces,
-    const std::vector<std::vector<gpf::FaceId>>& label_face_groups
-) {
-    std::vector<std::vector<Triangle>> triangle_groups;
-    triangle_groups.reserve(label_face_groups.size());
-    for (const auto& label_faces : label_face_groups) {
-        std::vector<Triangle> triangles;
-        triangles.reserve(faces.size());
-        for (const auto fid : label_faces) {
-            auto pts = faces[fid.idx] | views::transform([&points] (auto vid) {
-                auto& p = points[vid];
-                return Point_3(p[0], p[1], p[2]);
-            }) | ranges::to<std::vector>();
-            triangles.emplace_back(std::move(pts[0]), std::move(pts[1]), std::move(pts[2]));
-        }
-        triangle_groups.emplace_back(std::move(triangles));
-    }
-    return triangle_groups;
-}
-
-
-auto build_triangle_groups(
     const tet_mesh_boundary::Mesh& mesh,
     const std::size_t n_materials
 ) {
@@ -1076,7 +1065,6 @@ int main(int argc, char* argv[]) {
                 write_faces(std::format("region_{}.obj", i), boundary_mesh, region_faces);
         }
         write_mesh("fine.obj", boundary_mesh);
-
     }
 
     // Rebuild tets from split boundary faces and edges
@@ -1085,7 +1073,15 @@ int main(int argc, char* argv[]) {
     );
 
     auto [tet_mesh, tets] = build_tet_mesh(tet_points, tet_indices, tet_faces, face_tets);
-    // auto triangle_groups = build_triangle_groups(points, faces, label_face_groups);
+    {
+        auto boundary_faces = tet_mesh.faces() | views::filter([](auto f) { return f.prop().cells[1] == gpf::kInvalidIndex; }) |
+            views::transform([](auto f) { return f.id; }) |
+            ranges::to<std::vector>();
+        auto fid = boundary_faces[10033];
+        auto face_vertices = tet_mesh.face(fid).halfedges() | views::transform([](auto he) { return he.to().id.idx; }) |
+            ranges::to<std::vector>();
+        write_faces("boundary.obj", tet_mesh, boundary_faces);
+    }
     auto triangle_groups = build_triangle_groups(boundary_mesh, region_colors.size());
     write_msh("123.obj", tet_mesh);
     write_tet_msh("output.msh", tet_points, tet_indices);

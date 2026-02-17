@@ -121,13 +121,6 @@ struct FaceVertexKeyHash {
     }
 };
 
-struct CellVertexKeyHash {
-    std::size_t operator()(const std::array<std::size_t, 4>& key) const noexcept {
-        return boost::hash_value(key);
-    }
-};
-
-
 struct ExtractInfo {
     std::vector<std::array<double, 3>> points;
     std::vector<std::vector<std::size_t>> faces;
@@ -135,7 +128,6 @@ struct ExtractInfo {
     std::unordered_map<gpf::VertexId, std::size_t> vertex_map;
     std::unordered_map<std::tuple<gpf::EdgeId, std::size_t, std::size_t>, std::size_t, EdgeVertexKeyHash> edge_vertex_map;
     std::unordered_map<std::tuple<gpf::FaceId, std::size_t, std::size_t, std::size_t>, std::size_t, FaceVertexKeyHash> face_vertex_map;
-    std::unordered_map<std::array<std::size_t, 4>, std::size_t, CellVertexKeyHash> cell_vertex_map;
     std::unordered_map<gpf::FaceId, std::vector<std::size_t>> boundary_faces_map;
 
 
@@ -149,10 +141,6 @@ struct ExtractInfo {
 
     std::size_t add_vertex(const gpf::FaceId fid, const std::size_t m1, const std::size_t m2, const std::size_t m3) {
         return face_vertex_map.emplace(std::make_tuple(fid, m1, m2, m3), points.size()).first->second;
-    }
-
-    std::size_t add_vertex(const std::size_t m1, const std::size_t m2, const std::size_t m3, const std::size_t m4) {
-        return cell_vertex_map.emplace(std::array<std::size_t, 4>{{ m1, m2, m3, m4 }}, points.size()).first->second;
     }
 
     void remove_deleted_faces() {
@@ -675,7 +663,7 @@ void MaterialInterface::extract(
             assert(count <= 2);
             switch(count) {
             case 0:
-                global_vid = info.add_vertex(material_indices[vm[0] - 4], material_indices[vm[1] - 4], material_indices[vm[2] - 4], material_indices[vm[3] - 4]);
+                global_vid = info.points.size(); // vertices which are in tet are unique
                 break;
             case 1:
                 global_vid = info.add_vertex(tet.faces[vm[0]], material_indices[vm[1] - 4], material_indices[vm[2] - 4], material_indices[vm[3] - 4]);
@@ -811,13 +799,18 @@ void MaterialInterface::extract(
             info.faces.emplace_back(face.halfedges_reverse() | views::transform([](auto he) {
                 return he.to().data().property.global_id;
             }) | ranges::to<std::vector>());
-            info.face_materials.emplace_back(std::array<std::size_t, 2>{{
+            info.face_materials.push_back({
                 material_indices[cells[f_props.cells[1]].material - 4],
                 material_indices[cells[f_props.cells[0]].material - 4]
-            }});
+            });
         }
-        if (info.faces.size() == 11697) {
-            const auto a = 2;
+        {
+            const auto& face = info.faces.back();
+            if (ranges::count_if(face, [](auto idx) {
+                return idx == 4907 || idx == 28 || idx == 5800;
+            }) >= 3) {
+                const auto a = 2;
+            }
         }
     }
 
@@ -1231,7 +1224,7 @@ void do_material_interface(
 
         const auto& tvs = tet.vertices;
         if (ranges::count_if(tvs, [](const auto vid) {
-            return vid.idx == 37487 || vid.idx == 138 || vid.idx == 60049 || vid.idx == 49258;
+            return vid.idx == 25944 || vid.idx == 64597 || vid.idx == 25943 || vid.idx == 6465;
         }) >= 3) {
             const auto a = 2;
             save_tet(tid - 1, tets, tet_mesh);

@@ -977,7 +977,6 @@ auto project_polylines_on_mesh(
 
     constexpr double EPS = 1e-3;
     auto point_vertices = detail::project_points_on_mesh(points, mesh, EPS, face_parent_map, edge_parent_map);
-    write_mesh1("boundary.obj", mesh);
     detail::AuxiliaryMesh aux_mesh;
     aux_mesh.copy_from(mesh);
     gpf::update_edge_lengths<N>(aux_mesh, [mesh](auto v) {

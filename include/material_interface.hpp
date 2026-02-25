@@ -1,3 +1,5 @@
+#pragma once
+
 #include "tet_mesh.hpp"
 
 void do_material_interface(

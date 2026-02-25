@@ -21,6 +21,7 @@ struct Tet {
 struct VertexProp {
     std::array<double, 3> pt;
     std::vector<double> distances;
+    bool on_boundary {false};
 };
 
 struct FaceProp {

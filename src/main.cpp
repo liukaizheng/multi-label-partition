@@ -13,21 +13,22 @@
 
 #include <algorithm>
 #include <array>
-#include <boost/functional/hash.hpp>
 #include <deque>
 
 #include <gpf/manifold_mesh.hpp>
 #include <gpf/mesh.hpp>
-#include <mshio/mshio.h>
-
-#include <CLI/CLI.hpp>
 #include <gpf/handles.hpp>
 #include <gpf/ids.hpp>
-#include <gpf/utils.hpp>
+#include <gpf/project_polylines_on_mesh.hpp>
+
+#include <CLI/CLI.hpp>
+
+#include <mshio/mshio.h>
+
+#include <boost/functional/hash.hpp>
 
 #include "tet_mesh.hpp"
 #include "material_interface.hpp"
-#include "project_polylines_on_mesh.hpp"
 
 #include <fstream>
 #include <format>
@@ -915,7 +916,7 @@ void project_outline_parts(
     std::unordered_map<gpf::FaceId, gpf::FaceId>& face_parent_map,
     std::unordered_map<gpf::EdgeId, gpf::EdgeId>& edge_parent_map
 ) {
-    auto path_halfedges = project_polylines_on_mesh<3>(
+    auto path_halfedges = gpf::project_polylines_on_mesh<3>(
         outline_points,
         outline_parts | views::transform([] (const auto& part) {
             return part.indices;

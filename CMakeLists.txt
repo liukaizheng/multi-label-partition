@@ -9,23 +9,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(cmake/CPM.cmake)
 
-find_package(Eigen3 REQUIRED)
-set(CGAL_DO_NOT_WARN_ABOUT_CMAKE_BUILD_TYPE ON)
-find_package(CGAL REQUIRED)
-
 CPMAddPackage("gh:CLIUtils/CLI11#v2.6.1")
-# CPMAddPackage("gh:liukaizheng/mesh#main")
-CPMAddPackage(
-    NAME mesh
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../mesh
-)
-
+CPMAddPackage("gh:liukaizheng/gpf-algorithm#main")
 # CPMAddPackage(
-#     NAME predicates
-#     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../predicates
+#     NAME gpf-algorithm
+#     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/../gpf-algorithm
 # )
-CPMAddPackage("gh:liukaizheng/predicates#main")
-CPMAddPackage("gh:liukaizheng/triangulation#main")
 
 CPMAddPackage("gh:qnzhou/MshIO#main")
 
@@ -36,12 +25,8 @@ add_executable(multi-label-partition
 
 target_compile_features(multi-label-partition PRIVATE cxx_std_23)
 target_link_libraries(multi-label-partition PRIVATE
-    CGAL::CGAL
     CLI11::CLI11
-    Eigen3::Eigen
-    gpf::mesh
-    gpf::triangulation
-    predicates
+    gpf::algorithm
     mshio::mshio
 )
 target_include_directories(multi-label-partition PRIVATE

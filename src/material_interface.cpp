@@ -2,7 +2,6 @@
 
 #include "gpf/detail.hpp"
 #include "gpf/ids.hpp"
-#include "gpf/mesh.hpp"
 #include "gpf/surface_mesh.hpp"
 #include "gpf/utils.hpp"
 #include "tet_mesh.hpp"
@@ -72,7 +71,7 @@ auto write_cell(
     file.close();
 }
 
-
+namespace {
 struct VertexProp {
     std::array<std::size_t, 4> materials;
 
@@ -122,7 +121,14 @@ struct FaceVertexKeyHash {
 };
 
 struct ExtractInfo {
+
+    struct FaceProp {
+        std::size_t patch_id {gpf::kInvalidIndex};
+    };
+    using Mesh = gpf::SurfaceMesh<gpf::Empty, gpf::Empty, gpf::Empty, FaceProp>;
+
     std::vector<std::array<double, 3>> points;
+    std::vector<bool> point_on_boundary;
     std::vector<std::vector<std::size_t>> faces;
     std::vector<std::array<std::size_t, 2>> face_materials;
     std::unordered_map<gpf::VertexId, std::size_t> vertex_map;
@@ -162,16 +168,14 @@ struct ExtractInfo {
     auto extract_manifold_patches() {
         remove_deleted_faces();
 
-        struct ExtractFaceProp {
-            bool visited{false};
-        };
-        auto mesh = gpf::SurfaceMesh<gpf::Empty, gpf::Empty, gpf::Empty, ExtractFaceProp>::new_in(faces);
+        auto mesh = Mesh::new_in(faces);
         std::vector<std::vector<std::size_t>> patches;
         for (const auto face : mesh.faces()) {
-            if (face.data().property.visited) {
+            if (face.prop().patch_id != gpf::kInvalidIndex) {
                 continue;
             }
-            face.data().property.visited = true;
+            const auto patch_id = patches.size();
+            face.prop().patch_id = patch_id;
             std::vector<std::size_t> patch {face.id.idx};
             for (std::size_t i = 0; i < patch.size(); i++) {
                 for (const auto he : mesh.face(gpf::FaceId{patch[i]}).halfedges()) {
@@ -183,19 +187,231 @@ struct ExtractInfo {
                     auto h = he.sibling();
                     auto f = h.face();
                     auto& f_props = f.data().property;
-                    if (!f_props.visited) {
-                        f_props.visited = true;
+                    if (f_props.patch_id == gpf::kInvalidIndex) {
+                        f_props.patch_id = patch_id;
                         patch.emplace_back(f.id.idx);
                     }
                 }
             }
             patches.emplace_back(std::move(patch));
         }
-        return patches;
+        return std::make_pair(std::move(patches), std::move(mesh));
+    }
+
+    auto identify_chain_edges(const Mesh& mesh) {
+        std::unordered_map<gpf::VertexId, std::vector<gpf::EdgeId>> vertex_edge_map{};
+        for (auto edge : mesh.edges()) {
+            auto he = edge.halfedge();
+            if (he.sibling().sibling().id != he.id) {
+                for (const auto vid : {he.from().id, he.to().id}) {
+                    vertex_edge_map[vid].push_back(edge.id);
+                }
+            }
+        }
+        auto propagate_chain = [&mesh, &vertex_edge_map](gpf::HalfedgeId curr_hid, std::vector<std::size_t>& edge_chain_indices, std::size_t chain_id) {
+            std::vector<gpf::HalfedgeId> chain{curr_hid};
+            edge_chain_indices[mesh.he_edge(curr_hid).idx] =
+                gpf::oriented_index(chain_id, !mesh.he_canonical_dir(curr_hid));
+            while(true) {
+                const auto vb = mesh.he_to(curr_hid);
+                const auto& candidate_edges = vertex_edge_map.find(vb)->second;
+                if (candidate_edges.size() != std::size_t{2}) {
+                    break;
+                }
+                const auto next_eid = candidate_edges[0] == mesh.he_edge(curr_hid) ? candidate_edges[1] : candidate_edges[0];
+                if (edge_chain_indices[next_eid.idx] != gpf::kInvalidIndex) {
+                    break;
+                }
+
+                curr_hid = mesh.e_halfedge(next_eid);
+                if(mesh.he_to(curr_hid) == vb) {
+                    curr_hid = mesh.he_twin(curr_hid);
+                }
+                assert(curr_hid.valid());
+                assert(mesh.he_from(curr_hid) == vb);
+                edge_chain_indices[next_eid.idx] = gpf::oriented_index(chain_id, !mesh.he_canonical_dir(curr_hid));
+                chain.push_back(curr_hid);
+            }
+            return chain;
+        };
+
+        std::vector<std::vector<gpf::HalfedgeId>> chains;
+        std::vector<std::size_t> edge_chain_indices(mesh.n_edges_capacity(), gpf::kInvalidIndex);
+        for (const auto& [vid, edges] : vertex_edge_map) {
+            if (edges.size() < std::size_t{3}) {
+                continue;
+            }
+            for (const auto eid: edges) {
+                if (edge_chain_indices[eid.idx] != gpf::kInvalidIndex) {
+                    continue;
+                }
+                gpf::HalfedgeId start_hid = mesh.e_halfedge(eid);
+                if (mesh.he_to(start_hid) == vid) {
+                    start_hid = mesh.he_twin(start_hid);
+                }
+
+                if (!start_hid.valid()) {
+                    // It doesn't matter, we will identify this chain from the other non-manifold vertex
+                    continue;
+                }
+                assert(start_hid.valid());
+                assert(mesh.he_from(start_hid) == vid);
+                const auto chain_id = chains.size();
+                chains.push_back(propagate_chain(
+                    start_hid,
+                    edge_chain_indices,
+                    chain_id
+                ));
+            }
+        }
+        return chains;
+    }
+
+    void smooth_edges(const std::size_t n_smooths, const Mesh& mesh, const std::vector<gpf::HalfedgeId>& chain, std::vector<std::array<double, 3>>& cache_points) {
+        using Vec3 = Eigen::Vector3d;
+        std::unordered_map<std::size_t, std::array<std::size_t, 2>> vertex_neighbors(chain.size() + 1);
+        auto add_into_map = [&vertex_neighbors](const std::size_t va, const std::size_t vb) {
+            auto it = vertex_neighbors.find(va);
+            if (it == vertex_neighbors.end()) {
+                vertex_neighbors.emplace(va, std::array{vb, gpf::kInvalidIndex});
+            } else {
+                assert(it->second[1] == gpf::kInvalidIndex);
+                it->second[1] = vb;
+            }
+        };
+        for (const auto hid : chain) {
+            const auto va = mesh.he_from(hid).idx;
+            const auto vb = mesh.he_to(hid).idx;
+            add_into_map(va, vb);
+            add_into_map(vb, va);
+        }
+
+        for (std::size_t _ = 0; _ < n_smooths; _++) {
+            for (const auto& [va, neighbors] : vertex_neighbors) {
+                if (neighbors[1] == gpf::kInvalidIndex) {
+                    continue;
+                }
+                Vec3::Map(cache_points[va].data()) = (Vec3::Map(points[neighbors[0]].data()) + Vec3::Map(points[neighbors[1]].data())) * 0.5;
+            }
+            for (const auto& [vid, neighbors] : vertex_neighbors) {
+                if (neighbors[1] == gpf::kInvalidIndex) {
+                    continue;
+                }
+                points[vid] = cache_points[vid];
+            }
+        }
+    }
+
+    void smooth_faces(
+        const std::size_t n_smooths,
+        const Mesh& mesh,
+        const std::vector<std::size_t>& patches,
+        const std::vector<bool>& point_on_chain,
+        std::vector<std::array<double, 3>>& cache_points
+    ) {
+        using Vec3 = Eigen::Vector3d;
+        std::vector<bool> visited(mesh.n_vertices_capacity(), false);
+        std::vector<std::size_t> patch_interior_vertices;
+        for (const auto idx : patches) {
+            for (const auto he : mesh.face(gpf::FaceId{idx}).halfedges()) {
+                const auto vid = he.to().id.idx;
+                if (visited[vid]) {
+                    continue;
+                }
+                visited[vid] = true;
+                if (!point_on_chain[vid]) {
+                    patch_interior_vertices.emplace_back(vid);
+                }
+            }
+        }
+        for (std::size_t _ = 0; _ < n_smooths; _++) {
+            for (const auto va : patch_interior_vertices) {
+                auto pt = Vec3::Map(cache_points[va].data());
+                pt.setZero();
+                auto count = 0;
+                for (const auto he : mesh.vertex(gpf::VertexId{va}).outgoing_halfedges()) {
+                    pt += Vec3::Map(points[he.to().id.idx].data());
+                    count += 1;
+                }
+                pt /= static_cast<double>(count);
+            }
+            for (const auto vid : patch_interior_vertices) {
+                points[vid] = cache_points[vid];
+            }
+        }
+    }
+
+    void smooth(const Mesh& mesh, const std::vector<std::vector<std::size_t>>& patches) {
+        constexpr std::size_t n_smooth_edges = 20;
+        constexpr std::size_t n_smooth_faces = 20;
+        auto chains = identify_chain_edges(mesh);
+        // Debug: write each chain as a separate OBJ
+        for (std::size_t ci = 0; ci < chains.size(); ++ci) {
+            const auto& chain = chains[ci];
+            if (chain.empty()) continue;
+            std::ofstream chain_file("debug_chain_" + std::to_string(ci) + ".obj");
+            std::unordered_map<std::size_t, std::size_t> vid_to_obj;
+            std::size_t obj_idx = 0;
+            auto add_vid = [&](std::size_t vid) {
+                if (vid_to_obj.find(vid) == vid_to_obj.end()) {
+                    vid_to_obj[vid] = ++obj_idx;
+                    chain_file << "v " << points[vid][0] << " " << points[vid][1] << " " << points[vid][2] << "\n";
+                }
+            };
+            add_vid(mesh.he_from(chain.front()).idx);
+            for (const auto hid : chain) {
+                add_vid(mesh.he_to(hid).idx);
+            }
+            auto prev = vid_to_obj[mesh.he_from(chain.front()).idx];
+            for (const auto hid : chain) {
+                auto curr = vid_to_obj[mesh.he_to(hid).idx];
+                chain_file << "l " << prev << " " << curr << "\n";
+                prev = curr;
+            }
+            chain_file.close();
+        }
+
+        std::vector<std::array<double, 3>> cache_points(mesh.n_vertices_capacity());
+        for (const auto& chain : chains) {
+            // if (this->point_on_boundary[mesh.he_from(chain.front()).idx] &&
+            //     ranges::all_of(chain, [this, &mesh](auto hid) { return this->point_on_boundary[mesh.he_to(hid).idx]; })
+            // ) {
+            //     continue;
+            // }
+            // smooth_edges(n_smooth_edges, mesh, chain, cache_points);
+            if (!this->point_on_boundary[mesh.he_from(chain.front()).idx]) {
+                smooth_edges(n_smooth_edges, mesh, chain, cache_points);
+                continue;
+            }
+            for (const auto hid : chain) {
+                if (!this->point_on_boundary[mesh.he_to(hid).idx]) {
+                    smooth_edges(n_smooth_edges, mesh, chain, cache_points);
+                    break;
+                }
+            }
+        }
+        std::vector<bool> point_on_chain(mesh.n_vertices_capacity(), false);
+        for (const auto& chain : chains) {
+            point_on_chain[mesh.he_from(chain.front()).idx] = true;
+            for (auto hid : chain) {
+                point_on_chain[mesh.he_to(hid).idx] = true;
+            }
+        }
+
+        for (const auto& patch : patches) {
+            if (ranges::all_of(mesh.face(gpf::FaceId(patch.front())).halfedges(), [this](auto he) { return this->point_on_boundary[he.to().id.idx]; })) {
+                auto vertices = mesh.face(gpf::FaceId(patch.front())).halfedges() | views::transform([this](auto he) { return he.to().id; }) | ranges::to<std::vector>();
+                const auto a = 2;
+                // If one face of the patch is on the boundary, then all faces are on the boundary.
+                continue;
+            }
+            smooth_faces(n_smooth_faces, mesh, patch, point_on_chain, cache_points);
+        }
     }
 
     auto extract_material_cells(const std::size_t n_materials) {
-        auto patches = extract_manifold_patches();
+        const auto [patches, mesh] = extract_manifold_patches();
+        smooth(mesh, patches);
         auto patch_materials = patches | views::transform([this](const auto& patch) {
             auto iter = ranges::find_if(patch, [this] (const auto fid) {
                 return face_materials[fid][0] != gpf::kInvalidIndex;
@@ -648,7 +864,8 @@ void MaterialInterface::extract(
             if (global_vid != gpf::kInvalidIndex) {
                 global_vid = info.add_vertex(tet.vertices[vid]);
                 if (global_vid == info.points.size()) {
-                    info.points.emplace_back(std::array<double, 3>{{V(vid, 0), V(vid, 1), V(vid, 2)}});
+                    info.points.push_back({V(vid, 0), V(vid, 1), V(vid, 2)});
+                    info.point_on_boundary.emplace_back(tet_mesh.vertex_prop(tet.vertices[vid]).on_boundary);
                 }
 
             }
@@ -696,6 +913,16 @@ void MaterialInterface::extract(
                 }
                 #endif
             } else {
+                bool on_bnd = false;
+                if (count == 1) {
+                    on_bnd = tet_mesh.face(tet.faces[vm[0]]).prop().cells[1] == gpf::kInvalidIndex;
+                } else if (count == 2) {
+                    for (std::size_t k = 0; k < 4; k++) {
+                        if (k != vm[0] && k != vm[1]) {
+                            on_bnd = on_bnd || (tet_mesh.face(tet.faces[k]).prop().cells[1] == gpf::kInvalidIndex);
+                        }
+                    }
+                }
                 const auto& v_props = mesh.vertex_data(gpf::VertexId{vid}).property;
                 const auto [i1, i2] = v_props.parents;
                 auto [a1, b1] = v_props.vals[0];
@@ -706,6 +933,7 @@ void MaterialInterface::extract(
                 auto t = a1b2 / (a1b2 + a2b1);
                 V.row(vid) = V.row(i1.idx) * (1.0 - t) + V.row(i2.idx) * t;
                 info.points.emplace_back(std::array<double, 3>{{V(vid, 0), V(vid, 1), V(vid, 2)}});
+                info.point_on_boundary.emplace_back(on_bnd);
 
                 #ifndef NDEBUG
                 VM.row(vid) = VM.row(i1.idx) * (1.0 - t) + VM.row(i2.idx) * t;
@@ -957,12 +1185,12 @@ void MaterialInterface::split_faces() noexcept {
                         auto new_he = mesh.halfedge(mesh.split_face(fid, first_zero_vid, vh.id));
                         auto new_fh = new_he.face();
                         face = mesh.face(fid); // new face added, rebind face
-                        new_fh.data().property = face.data().property;
+                        new_fh.prop() = face.prop();
                         auto& new_e_props = new_he.edge().data().property;
-                        new_e_props.materials = {{face.data().property.materials[0], face.data().property.materials[1], this->materials.size() + 3}};
+                        new_e_props.materials = {{face.prop().materials[0], face.prop().materials[1], this->materials.size() + 3}};
                         new_e_props.parent = new_he.data().edge;
                         for (std::size_t i = 0; i < 2; i++) {
-                            auto cid = face.data().property.cells[i];
+                            auto cid = face.prop().cells[i];
                             if (cid != gpf::kInvalidIndex) {
                                 cells[cid].faces.emplace_back((new_fh.id.idx << 1) + i);
                             }
@@ -1170,11 +1398,11 @@ void write_material_cells(
         write_mesh(prefix + "_" + std::to_string(mid) + ".obj", cell_points, cell_faces);
     }
 }
+} // unnamed namespace
 
 void do_material_interface(
     const std::vector<tet_mesh::Tet> &tets,
-    const tet_mesh::TetMesh &tet_mesh,
-    const std::vector<bool> &is_boundary_vertex
+    const tet_mesh::TetMesh &tet_mesh
 ) {
     MaterialInterface base_mi;
     const auto n_materials = tet_mesh.vertex(gpf::VertexId{0}).data().property.distances.size();
@@ -1210,11 +1438,13 @@ void do_material_interface(
                     continue;
                 }
 
-                info.faces.emplace_back(views::transform(face.halfedges(), [&info](auto he) {
-                    auto vid = he.to().id;
-                    auto global_vid = info.add_vertex(vid);
+                info.faces.emplace_back(views::transform(face.halfedges(), [&info, &tet_mesh](auto he) {
+                    auto vertex = he.to();
+                    auto global_vid = info.add_vertex(vertex.id);
                     if (global_vid == info.points.size()) {
-                        info.points.emplace_back(he.mesh->vertex_data(vid).property.pt);
+                        const auto& v_prop = vertex.prop();
+                        info.points.emplace_back(v_prop.pt);
+                        info.point_on_boundary.emplace_back(v_prop.on_boundary);
                     }
                     return global_vid;
                 }) | ranges::to<std::vector>());
@@ -1275,8 +1505,14 @@ void do_material_interface(
 
         mi.extract(info, tet_mesh, tet, tet_material_indices);
     }
-
     auto [patches, material_cells] = info.extract_material_cells(n_materials);
+    {
+        std::vector<std::vector<std::size_t>> patch_indices;
+        for (std::size_t i = 0; i < patches.size(); i++) {
+            patch_indices.push_back({i * 2});
+        }
+        write_material_cells("patch", info.points, info.faces, patches, patch_indices);
+    }
     write_material_cells("material", info.points, info.faces, patches, material_cells);
     write_mesh("output.obj", info.points, info.faces);
     // write_mesh("patch_0.obj", info.points, patches[0] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());

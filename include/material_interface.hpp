@@ -4,6 +4,5 @@
 
 void do_material_interface(
     const std::vector<tet_mesh::Tet>& tets,
-    const tet_mesh::TetMesh& tet_mesh,
-    const std::vector<bool>& is_boundary_vertex
+    const tet_mesh::TetMesh& tet_mesh
 );

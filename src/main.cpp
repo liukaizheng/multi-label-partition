@@ -821,7 +821,7 @@ void split_tets_by_edge(
     }
 }
 
-auto rebuild_tets_from_split_boundary(
+void rebuild_tets_from_split_boundary(
     std::vector<std::array<double, 3>>& tet_points,
     const std::vector<std::array<std::size_t, 3>>& tet_faces,
     const std::vector<std::array<std::size_t, 2>>& face_tets,
@@ -866,7 +866,6 @@ auto rebuild_tets_from_split_boundary(
 
     split_tets_by_face(tet_points, tet_faces, face_tets, tets, boundary_faces, boundary_to_tet_vertex, is_boundary_vertex, boundary_mesh, face_parent_map, split_edge_info_vec);
     split_tets_by_edge(tets, boundary_to_tet_vertex, boundary_mesh, split_edge_info_vec);
-    return is_boundary_vertex;
 }
 
 void mark_face_region(
@@ -1106,7 +1105,11 @@ auto build_tet_mesh(
     }
 
     for (auto f : mesh.faces()) {
-        f.data().property.cells = std::move(face_tets[f.id.idx]);
+        auto& f_prop = f.prop();
+        f_prop.cells = std::move(face_tets[f.id.idx]);
+        for (auto he : f.halfedges()) {
+            he.to().prop().on_boundary = true;
+        }
     }
 
     return std::make_pair(std::move(mesh), std::move(tets));
@@ -1161,7 +1164,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Rebuild tets from split boundary faces and edges
-    auto is_boundary_vertex = tet_mesh_boundary::rebuild_tets_from_split_boundary(
+    tet_mesh_boundary::rebuild_tets_from_split_boundary(
         tet_points, tet_faces, face_tets, tet_indices, boundary_faces, std::move(boundary_vertices), boundary_mesh, face_parent_map, edge_parent_map, boundary_edge_tets
     );
 
@@ -1180,6 +1183,6 @@ int main(int argc, char* argv[]) {
     write_tet_msh("output.msh", tet_points, tet_indices);
 
     setup_neg_distance(tet_mesh, triangle_groups);
-    do_material_interface(tets, tet_mesh, is_boundary_vertex);
+    do_material_interface(tets, tet_mesh);
     return 0;
 }

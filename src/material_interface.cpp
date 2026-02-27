@@ -20,6 +20,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <numeric>
+#include <queue>
 
 namespace ranges = std::ranges;
 namespace views = std::views;
@@ -95,6 +97,32 @@ struct FaceProp {
 struct Cell {
     std::vector<std::size_t> faces;
     std::size_t material{4ull};
+};
+
+struct UnionFind {
+    std::vector<std::size_t> parent;
+    std::vector<std::size_t> rank;
+
+    explicit UnionFind(std::size_t n) : parent(n), rank(n, 0) {
+        std::iota(parent.begin(), parent.end(), 0);
+    }
+
+    std::size_t find(std::size_t x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        return x;
+    }
+
+    void unite(std::size_t x, std::size_t y) {
+        x = find(x);
+        y = find(y);
+        if (x == y) return;
+        if (rank[x] < rank[y]) std::swap(x, y);
+        parent[y] = x;
+        if (rank[x] == rank[y]) rank[x]++;
+    }
 };
 
 using Mesh = gpf::SurfaceMesh<VertexProp, gpf::Empty, EdgeProp, FaceProp>;
@@ -405,7 +433,7 @@ struct MaterialInterface {
     MaterialInterface(const MaterialInterface&) = default;
 
     void add_material(const std::array<double, 4>& material);
-    void extract(ExtractInfo& info, const tet_mesh::TetMesh& tet_mesh, const tet_mesh::Tet& tet, const std::vector<std::size_t>& material_indices) noexcept;
+    void extract(ExtractInfo& info, const tet_mesh::TetMesh& tet_mesh, const tet_mesh::Tet& tet, const std::vector<std::size_t>& material_indices, const std::vector<std::size_t>& cell_global_materials) noexcept;
 private:
     double compute_vert_orientations(const gpf::VertexId vid);
     void split_edges() noexcept;
@@ -787,7 +815,8 @@ void MaterialInterface::extract(
     ExtractInfo& info,
     const tet_mesh::TetMesh& tet_mesh,
     const tet_mesh::Tet& tet,
-    const std::vector<std::size_t>& material_indices
+    const std::vector<std::size_t>& material_indices,
+    const std::vector<std::size_t>& cell_global_materials
 ) noexcept {
     auto face_vertices_temp = mesh.faces() |
         views::transform([](const auto& face) {
@@ -803,7 +832,7 @@ void MaterialInterface::extract(
         const auto pid = face_props.materials[0];
         if (pid >= 4) {
             face_props.keep = face_props.materials[1] >= 4 &&
-                cells[face_props.cells[0]].material != cells[face_props.cells[1]].material;
+                cell_global_materials[face_props.cells[0]] != cell_global_materials[face_props.cells[1]];
         } else if (!face_props.keep) {
             face_props.keep = tet_mesh.face(tet.faces[pid]).data().property.cells[1] == gpf::kInvalidIndex;
         }
@@ -943,7 +972,7 @@ void MaterialInterface::extract(
             auto face_vertices = face.halfedges() |
                 views::transform([] (auto he) { return he.to().data().property.global_id; }) |
                 ranges::to<std::vector>();
-            const auto mid = material_indices[cells[f_props.cells[0]].material - 4];
+            const auto mid = cell_global_materials[f_props.cells[0]];
             if (is_new_boundary_faces[pid]) {
                 info.boundary_faces_map[tet_fid].emplace_back(info.faces.size());
                 info.faces.emplace_back(std::move(face_vertices));
@@ -985,14 +1014,19 @@ void MaterialInterface::extract(
                 }
             }
         } else {
-            assert(cells[f_props.cells[0]].material > cells[f_props.cells[1]].material);
-            info.faces.emplace_back(face.halfedges_reverse() | views::transform([](auto he) {
-                return he.to().data().property.global_id;
-            }) | ranges::to<std::vector>());
-            info.face_materials.push_back({
-                material_indices[cells[f_props.cells[1]].material - 4],
-                material_indices[cells[f_props.cells[0]].material - 4]
-            });
+            auto gm0 = cell_global_materials[f_props.cells[0]];
+            auto gm1 = cell_global_materials[f_props.cells[1]];
+            if (gm0 > gm1) {
+                info.faces.emplace_back(face.halfedges_reverse() | views::transform([](auto he) {
+                    return he.to().data().property.global_id;
+                }) | ranges::to<std::vector>());
+                info.face_materials.push_back({gm1, gm0});
+            } else {
+                info.faces.emplace_back(face.halfedges() | views::transform([](auto he) {
+                    return he.to().data().property.global_id;
+                }) | ranges::to<std::vector>());
+                info.face_materials.push_back({gm0, gm1});
+            }
         }
         {
             const auto& face = info.faces.back();
@@ -1383,23 +1417,276 @@ void do_material_interface(
         separators.emplace_back(v_high_materials.size());
     }
 
-    ExtractInfo info;
-    std::array<double, 12> corners;
-    std::size_t tid = 0;
-    for (const auto &tet : tets) {
-        tid += 1;
+    // ========== Phase 1: Split all tets without extracting ==========
+    struct TetInfo {
+        MaterialInterface mi;
+        std::vector<std::size_t> tet_material_indices;
+        std::size_t global_cell_offset{0};
+        bool is_multi_material{false};
+        std::size_t single_material{0};
+    };
+
+    std::vector<TetInfo> tet_infos(tets.size());
+    std::size_t total_global_cells = 0;
+
+    for (std::size_t tid = 0; tid < tets.size(); ++tid) {
+        const auto& tet = tets[tid];
         std::unordered_set<std::size_t> tet_material_set;
         for (const auto vid : tet.vertices) {
             const auto idx = vid.idx;
             tet_material_set.insert(v_high_materials.begin() + separators[idx], v_high_materials.begin() + separators[idx + 1]);
         }
+
+        auto& ti = tet_infos[tid];
+        ti.global_cell_offset = total_global_cells;
+
         if (tet_material_set.size() < 2) {
+            ti.is_multi_material = false;
+            ti.single_material = v_high_materials[separators[tet.vertices[0].idx]];
+            total_global_cells += 1;
+            continue;
+        }
+
+        const auto& tvs = tet.vertices;
+        if (ranges::count_if(tvs, [](const auto vid) {
+            return vid.idx == 25944 || vid.idx == 64597 || vid.idx == 25943 || vid.idx == 6465;
+        }) >= 3) {
+            const auto a = 2;
+            save_tet(tid, tets, tet_mesh);
+        }
+
+        std::array<double, 4> min_material_values;
+        for (auto [vid, v] : ranges::zip_view{tvs, min_material_values}) {
+            auto& vals = tet_mesh.vertex(vid).data().property.distances;
+            v = ranges::min(tet_material_set | views::transform([&vals] (auto m) { return vals[m]; }));
+        }
+        for (std::size_t m = 0; m < n_materials; m++) {
+            if (tet_material_set.contains(m)) {
+                continue;
+            }
+            auto count = ranges::count_if(ranges::zip_view{tvs, min_material_values}, [&tet_mesh, m] (auto pair) {
+                auto [vid, v] = pair;
+                return tet_mesh.vertex(vid).data().property.distances[m] > v;
+            });
+            if (count > 1) {
+                tet_material_set.insert(m);
+            }
+        }
+
+        ti.is_multi_material = true;
+        auto mi = base_mi;
+        ti.tet_material_indices = tet_material_set | ranges::to<std::vector>();
+        ranges::sort(ti.tet_material_indices);
+        for (const auto& m_idx : ti.tet_material_indices) {
+            std::array<double, 4> material;
+            for (auto [vid, v] : ranges::zip_view{tvs, material}) {
+                v = tet_mesh.vertex(vid).data().property.distances[m_idx];
+            }
+            mi.add_material(material);
+        }
+        total_global_cells += mi.cells.size();
+        ti.mi = std::move(mi);
+    }
+
+    // ========== Phase 2: Build global cell adjacency graph ==========
+    std::vector<std::size_t> global_cell_material(total_global_cells);
+    std::vector<std::vector<std::size_t>> cell_adjacency(total_global_cells);
+
+    // Fill in materials for each global cell
+    for (std::size_t tid = 0; tid < tets.size(); ++tid) {
+        const auto& ti = tet_infos[tid];
+        if (!ti.is_multi_material) {
+            global_cell_material[ti.global_cell_offset] = ti.single_material;
+        } else {
+            for (std::size_t cid = 0; cid < ti.mi.cells.size(); ++cid) {
+                global_cell_material[ti.global_cell_offset + cid] =
+                    ti.tet_material_indices[ti.mi.cells[cid].material - 4];
+            }
+        }
+    }
+
+    // Within-tet adjacency from internal faces
+    for (std::size_t tid = 0; tid < tets.size(); ++tid) {
+        const auto& ti = tet_infos[tid];
+        if (!ti.is_multi_material) continue;
+
+        for (const auto face : ti.mi.mesh.faces()) {
+            const auto& f_props = face.data().property;
+            if (f_props.materials[0] >= 4 && f_props.materials[1] >= 4) {
+                auto gc0 = ti.global_cell_offset + f_props.cells[0];
+                auto gc1 = ti.global_cell_offset + f_props.cells[1];
+                if (gc0 != gc1) {
+                    cell_adjacency[gc0].push_back(gc1);
+                    cell_adjacency[gc1].push_back(gc0);
+                }
+            }
+        }
+    }
+
+    // Cross-tet adjacency: map tet_face -> global cells touching it from each tet
+    std::unordered_map<gpf::FaceId, std::vector<std::pair<std::size_t, std::size_t>>> tet_face_cells;
+
+    for (std::size_t tid = 0; tid < tets.size(); ++tid) {
+        const auto& tet = tets[tid];
+        const auto& ti = tet_infos[tid];
+
+        if (!ti.is_multi_material) {
+            auto gc = ti.global_cell_offset;
+            for (const auto fid : tet.faces) {
+                tet_face_cells[fid].emplace_back(gc, tid);
+            }
+        } else {
+            std::array<std::unordered_set<std::size_t>, 4> face_touching_cells;
+            for (std::size_t cid = 0; cid < ti.mi.cells.size(); ++cid) {
+                for (const auto ori_fid : ti.mi.cells[cid].faces) {
+                    auto fid = gpf::FaceId{gpf::strip_orientation(ori_fid)};
+                    const auto& f_props = ti.mi.mesh.face(fid).data().property;
+                    if (f_props.materials[0] < 4) {
+                        face_touching_cells[f_props.materials[0]].insert(cid);
+                    }
+                }
+            }
+            for (std::size_t pid = 0; pid < 4; ++pid) {
+                const auto tet_fid = tet.faces[pid];
+                for (auto cid : face_touching_cells[pid]) {
+                    tet_face_cells[tet_fid].emplace_back(ti.global_cell_offset + cid, tid);
+                }
+            }
+        }
+    }
+
+    // Connect cells from different tets sharing a tet face
+    for (const auto& [tet_fid, cells_on_face] : tet_face_cells) {
+        for (std::size_t i = 0; i < cells_on_face.size(); ++i) {
+            for (std::size_t j = i + 1; j < cells_on_face.size(); ++j) {
+                if (cells_on_face[i].second != cells_on_face[j].second) {
+                    auto gc_i = cells_on_face[i].first;
+                    auto gc_j = cells_on_face[j].first;
+                    cell_adjacency[gc_i].push_back(gc_j);
+                    cell_adjacency[gc_j].push_back(gc_i);
+                }
+            }
+        }
+    }
+
+    // ========== Phase 3: Union-Find for same-material connected components ==========
+    UnionFind uf(total_global_cells);
+    for (std::size_t gc = 0; gc < total_global_cells; ++gc) {
+        for (auto adj : cell_adjacency[gc]) {
+            if (global_cell_material[gc] == global_cell_material[adj]) {
+                uf.unite(gc, adj);
+            }
+        }
+    }
+
+    // Collect components: root -> list of global cell ids
+    std::unordered_map<std::size_t, std::vector<std::size_t>> components;
+    for (std::size_t gc = 0; gc < total_global_cells; ++gc) {
+        components[uf.find(gc)].push_back(gc);
+    }
+
+    // ========== Phase 4: Identify main components and reassign ==========
+    // Main component for each material: the one containing domain-boundary cells
+    std::vector<std::size_t> material_main_component(n_materials, gpf::kInvalidIndex);
+
+    for (std::size_t tid = 0; tid < tets.size(); ++tid) {
+        const auto& tet = tets[tid];
+        const auto& ti = tet_infos[tid];
+
+        if (!ti.is_multi_material) {
+            for (const auto fid : tet.faces) {
+                if (tet_mesh.face(fid).data().property.cells[1] == gpf::kInvalidIndex) {
+                    auto gc = ti.global_cell_offset;
+                    auto mat = global_cell_material[gc];
+                    material_main_component[mat] = uf.find(gc);
+                    break;
+                }
+            }
+        } else {
+            for (std::size_t cid = 0; cid < ti.mi.cells.size(); ++cid) {
+                auto gc = ti.global_cell_offset + cid;
+                auto mat = global_cell_material[gc];
+                if (material_main_component[mat] != gpf::kInvalidIndex) continue;
+
+                for (const auto ori_fid : ti.mi.cells[cid].faces) {
+                    auto fid = gpf::FaceId{gpf::strip_orientation(ori_fid)};
+                    const auto& f_props = ti.mi.mesh.face(fid).data().property;
+                    if (f_props.materials[0] < 4) {
+                        auto pid = f_props.materials[0];
+                        if (tet_mesh.face(tet.faces[pid]).data().property.cells[1] == gpf::kInvalidIndex) {
+                            material_main_component[mat] = uf.find(gc);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build component adjacency graph
+    std::unordered_map<std::size_t, std::unordered_set<std::size_t>> comp_adjacency;
+    for (std::size_t gc = 0; gc < total_global_cells; ++gc) {
+        auto root_gc = uf.find(gc);
+        for (auto adj : cell_adjacency[gc]) {
+            auto root_adj = uf.find(adj);
+            if (root_gc != root_adj) {
+                comp_adjacency[root_gc].insert(root_adj);
+            }
+        }
+    }
+
+    // BFS from main components to reassign non-main components
+    std::unordered_map<std::size_t, std::size_t> comp_material; // component root -> assigned material
+    std::queue<std::size_t> bfs_queue;
+
+    // Seed main components
+    for (const auto& [root, cells_in_comp] : components) {
+        auto mat = global_cell_material[cells_in_comp[0]];
+        if (material_main_component[mat] == root) {
+            comp_material[root] = mat;
+            bfs_queue.push(root);
+        }
+    }
+
+    // Expand: assign unassigned components to the material of the nearest main component
+    while (!bfs_queue.empty()) {
+        auto comp = bfs_queue.front();
+        bfs_queue.pop();
+        auto mat = comp_material[comp];
+
+        auto it = comp_adjacency.find(comp);
+        if (it == comp_adjacency.end()) continue;
+
+        for (auto adj_comp : it->second) {
+            if (comp_material.contains(adj_comp)) continue;
+            comp_material[adj_comp] = mat;
+            bfs_queue.push(adj_comp);
+        }
+    }
+
+    // Apply reassigned materials to global_cell_material
+    for (const auto& [root, cells_in_comp] : components) {
+        auto it = comp_material.find(root);
+        if (it != comp_material.end()) {
+            for (auto gc : cells_in_comp) {
+                global_cell_material[gc] = it->second;
+            }
+        }
+    }
+
+    // ========== Phase 5: Extract with reassigned materials ==========
+    ExtractInfo info;
+
+    for (std::size_t tid = 0; tid < tets.size(); ++tid) {
+        const auto& tet = tets[tid];
+        auto& ti = tet_infos[tid];
+
+        if (!ti.is_multi_material) {
             for (const auto fid : tet.faces) {
                 auto face = tet_mesh.face(fid);
                 if (face.data().property.cells[1] != gpf::kInvalidIndex) {
                     continue;
                 }
-
                 info.faces.emplace_back(views::transform(face.halfedges(), [&info, &tet_mesh](auto he) {
                     auto vertex = he.to();
                     auto global_vid = info.add_vertex(vertex.id);
@@ -1415,58 +1702,15 @@ void do_material_interface(
             continue;
         }
 
-        const auto& tvs = tet.vertices;
-        if (ranges::count_if(tvs, [](const auto vid) {
-            return vid.idx == 25944 || vid.idx == 64597 || vid.idx == 25943 || vid.idx == 6465;
-        }) >= 3) {
-            const auto a = 2;
-            save_tet(tid - 1, tets, tet_mesh);
-        }
-        for (std::size_t i = 0; i < 4; i++) {
-            auto p1 = &corners[i * 3];
-            const auto& p2 = tet_mesh.vertex_data(tvs[i]).property.pt;
-            p1[0] = p2[0];
-            p1[1] = p2[1];
-            p1[2] = p2[2];
+        // Build per-cell global materials for this tet
+        std::vector<std::size_t> cell_gm(ti.mi.cells.size());
+        for (std::size_t cid = 0; cid < ti.mi.cells.size(); ++cid) {
+            cell_gm[cid] = global_cell_material[ti.global_cell_offset + cid];
         }
 
-        std::array<double, 4> min_material_values;
-        for (auto [vid, v] : ranges::zip_view{tvs, min_material_values}) {
-            auto& vals = tet_mesh.vertex(vid).data().property.distances;
-            v = ranges::min(tet_material_set | views::transform([&vals] (auto m) { return vals[m]; }));
-        }
-        for (std::size_t m = 0; m < n_materials; m++) {
-            if (tet_material_set.contains(m)) {
-                continue;
-            }
-            auto count = ranges::count_if(ranges::zip_view{tvs, min_material_values},  [&tet_mesh, m] (auto pair) {
-                auto [vid, v] = pair;
-                return tet_mesh.vertex(vid).data().property.distances[m] > v;
-            });
-
-            if (count > 1) {
-                tet_material_set.insert(m);
-            }
-        }
-
-        auto mi = base_mi;
-        mi.materials.reserve(tet_material_set.size());
-        auto tet_material_indices = tet_material_set | ranges::to<std::vector>();
-        ranges::sort(tet_material_indices);
-        auto materials = tet_material_indices | views::transform([&tvs, &tet_mesh](auto mid) {
-            std::array<double, 4> material;
-            for (auto [vid, v] : ranges::zip_view{tvs, material}) {
-                v = tet_mesh.vertex(vid).data().property.distances[mid];
-            }
-            return material;
-        }) | ranges::to<std::vector>();
-
-        for (const auto& m : materials) {
-            mi.add_material(m);
-        }
-
-        mi.extract(info, tet_mesh, tet, tet_material_indices);
+        ti.mi.extract(info, tet_mesh, tet, ti.tet_material_indices, cell_gm);
     }
+
     auto [patches, material_cells] = info.extract_material_cells(n_materials);
     {
         std::vector<std::vector<std::size_t>> patch_indices;

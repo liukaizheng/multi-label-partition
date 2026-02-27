@@ -345,51 +345,16 @@ struct ExtractInfo {
         constexpr std::size_t n_smooth_edges = 20;
         constexpr std::size_t n_smooth_faces = 20;
         auto chains = identify_chain_edges(mesh);
-        // Debug: write each chain as a separate OBJ
-        for (std::size_t ci = 0; ci < chains.size(); ++ci) {
-            const auto& chain = chains[ci];
-            if (chain.empty()) continue;
-            std::ofstream chain_file("debug_chain_" + std::to_string(ci) + ".obj");
-            std::unordered_map<std::size_t, std::size_t> vid_to_obj;
-            std::size_t obj_idx = 0;
-            auto add_vid = [&](std::size_t vid) {
-                if (vid_to_obj.find(vid) == vid_to_obj.end()) {
-                    vid_to_obj[vid] = ++obj_idx;
-                    chain_file << "v " << points[vid][0] << " " << points[vid][1] << " " << points[vid][2] << "\n";
-                }
-            };
-            add_vid(mesh.he_from(chain.front()).idx);
-            for (const auto hid : chain) {
-                add_vid(mesh.he_to(hid).idx);
-            }
-            auto prev = vid_to_obj[mesh.he_from(chain.front()).idx];
-            for (const auto hid : chain) {
-                auto curr = vid_to_obj[mesh.he_to(hid).idx];
-                chain_file << "l " << prev << " " << curr << "\n";
-                prev = curr;
-            }
-            chain_file.close();
-        }
-
         std::vector<std::array<double, 3>> cache_points(mesh.n_vertices_capacity());
         for (const auto& chain : chains) {
-            // if (this->point_on_boundary[mesh.he_from(chain.front()).idx] &&
-            //     ranges::all_of(chain, [this, &mesh](auto hid) { return this->point_on_boundary[mesh.he_to(hid).idx]; })
-            // ) {
-            //     continue;
-            // }
-            // smooth_edges(n_smooth_edges, mesh, chain, cache_points);
-            if (!this->point_on_boundary[mesh.he_from(chain.front()).idx]) {
-                smooth_edges(n_smooth_edges, mesh, chain, cache_points);
+            if (this->point_on_boundary[mesh.he_from(chain.front()).idx] &&
+                ranges::all_of(chain, [this, &mesh](auto hid) { return this->point_on_boundary[mesh.he_to(hid).idx]; })
+            ) {
                 continue;
             }
-            for (const auto hid : chain) {
-                if (!this->point_on_boundary[mesh.he_to(hid).idx]) {
-                    smooth_edges(n_smooth_edges, mesh, chain, cache_points);
-                    break;
-                }
-            }
+            smooth_edges(n_smooth_edges, mesh, chain, cache_points);
         }
+
         std::vector<bool> point_on_chain(mesh.n_vertices_capacity(), false);
         for (const auto& chain : chains) {
             point_on_chain[mesh.he_from(chain.front()).idx] = true;
@@ -867,7 +832,6 @@ void MaterialInterface::extract(
                     info.points.push_back({V(vid, 0), V(vid, 1), V(vid, 2)});
                     info.point_on_boundary.emplace_back(tet_mesh.vertex_prop(tet.vertices[vid]).on_boundary);
                 }
-
             }
             #ifndef NDEBUG
             for (std::size_t i = 0; i < materials.size(); ++i) {
@@ -917,11 +881,9 @@ void MaterialInterface::extract(
                 if (count == 1) {
                     on_bnd = tet_mesh.face(tet.faces[vm[0]]).prop().cells[1] == gpf::kInvalidIndex;
                 } else if (count == 2) {
-                    for (std::size_t k = 0; k < 4; k++) {
-                        if (k != vm[0] && k != vm[1]) {
-                            on_bnd = on_bnd || (tet_mesh.face(tet.faces[k]).prop().cells[1] == gpf::kInvalidIndex);
-                        }
-                    }
+                    const auto eid = tet.edges[tet_mesh::Tet::edge_index(vm[0], vm[1])];
+                    auto [v1, v2] = tet_mesh.e_vertices(eid);
+                    on_bnd = tet_mesh.vertex(v1).prop().on_boundary && tet_mesh.vertex(v2).prop().on_boundary;
                 }
                 const auto& v_props = mesh.vertex_data(gpf::VertexId{vid}).property;
                 const auto [i1, i2] = v_props.parents;
@@ -1515,7 +1477,4 @@ void do_material_interface(
     }
     write_material_cells("material", info.points, info.faces, patches, material_cells);
     write_mesh("output.obj", info.points, info.faces);
-    // write_mesh("patch_0.obj", info.points, patches[0] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());
-    // write_mesh("patch_1.obj", info.points, patches[1] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());
-    // write_mesh("patch_2.obj", info.points, patches[2] | views::transform([&info](auto fid) { return info.faces[fid]; }) | ranges::to<std::vector>());
 }

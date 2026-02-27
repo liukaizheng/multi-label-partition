@@ -1107,8 +1107,10 @@ auto build_tet_mesh(
     for (auto f : mesh.faces()) {
         auto& f_prop = f.prop();
         f_prop.cells = std::move(face_tets[f.id.idx]);
-        for (auto he : f.halfedges()) {
-            he.to().prop().on_boundary = true;
+        if (f_prop.cells[1] == gpf::kInvalidIndex) {
+            for (auto he : f.halfedges()) {
+                he.to().prop().on_boundary = true;
+            }
         }
     }
 

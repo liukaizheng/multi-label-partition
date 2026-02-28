@@ -26,6 +26,7 @@ struct VertexProp {
 
 struct FaceProp {
     std::array<std::size_t, 2> cells;
+    std::size_t material {gpf::kInvalidIndex};
 };
 
 using TetMesh = gpf::SurfaceMesh<VertexProp, gpf::Empty, gpf::Empty, FaceProp>;

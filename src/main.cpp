@@ -827,7 +827,7 @@ void rebuild_tets_from_split_boundary(
     const std::vector<std::array<std::size_t, 2>>& face_tets,
     std::vector<std::array<std::size_t, 4>>& tets,
     const std::vector<std::size_t>& boundary_faces,
-    std::vector<std::size_t>&& boundary_to_tet_vertex,
+    std::vector<std::size_t>& boundary_to_tet_vertex,
     Mesh& boundary_mesh,
     const std::unordered_map<gpf::FaceId, gpf::FaceId>& face_parent_map,
     const std::unordered_map<gpf::EdgeId, gpf::EdgeId>& edge_parent_map,
@@ -1124,6 +1124,7 @@ auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<T
         trees.emplace_back(triangles.begin(), triangles.end());
         trees.back().accelerate_distance_queries();
     }
+    constexpr double EPSILON = 0.0009765625; // 2^(-10)
     for (auto v : mesh.vertices()) {
         auto& dists = v.data().property.distances;
         const auto& p = v.data().property.pt;
@@ -1132,8 +1133,32 @@ auto setup_neg_distance(tet_mesh::TetMesh& mesh, const std::vector<std::vector<T
         for (auto [d, tree] : ranges::zip_view(dists, trees)) {
             // auto [closest_point, primitive] = tree.closest_point_and_primitive(pt);
             // auto fid = primitive - triangle_groups[idx++].begin();
-            d = -std::sqrt(tree.squared_distance(pt));
+            d = -std::round(std::sqrt(tree.squared_distance(pt)) / EPSILON) * EPSILON;
         }
+    }
+}
+
+void map_boundary_regions_to_tet_faces(
+    const tet_mesh_boundary::Mesh& boundary_mesh,
+    const std::vector<std::size_t>& boundary_vertices,
+    tet_mesh::TetMesh& tet_mesh
+) {
+    std::vector<std::size_t> tet_vid_to_boundary_vid(tet_mesh.n_vertices_capacity(), gpf::kInvalidIndex);
+    for (std::size_t vid = 0; vid < boundary_vertices.size(); vid++) {
+        tet_vid_to_boundary_vid[boundary_vertices[vid]] = vid;
+    }
+
+    for (auto face : tet_mesh.faces()) {
+        if (face.prop().cells[1] != gpf::kInvalidIndex) {
+            continue;
+        }
+        auto he = face.halfedge();
+        auto va = gpf::VertexId{tet_vid_to_boundary_vid[he.from().id.idx]};
+        auto vb = gpf::VertexId{tet_vid_to_boundary_vid[he.to().id.idx]};
+        assert(va.valid() && vb.valid());
+        auto boundary_hid = boundary_mesh.he_from_vertices(va, vb);
+        assert(boundary_hid.valid());
+        face.prop().material = boundary_mesh.halfedge(boundary_hid).face().prop().region_index;
     }
 }
 }
@@ -1167,7 +1192,7 @@ int main(int argc, char* argv[]) {
 
     // Rebuild tets from split boundary faces and edges
     tet_mesh_boundary::rebuild_tets_from_split_boundary(
-        tet_points, tet_faces, face_tets, tet_indices, boundary_faces, std::move(boundary_vertices), boundary_mesh, face_parent_map, edge_parent_map, boundary_edge_tets
+        tet_points, tet_faces, face_tets, tet_indices, boundary_faces, boundary_vertices, boundary_mesh, face_parent_map, edge_parent_map, boundary_edge_tets
     );
 
     auto [tet_mesh, tets] = build_tet_mesh(tet_points, tet_indices, tet_faces, face_tets);
@@ -1180,6 +1205,7 @@ int main(int argc, char* argv[]) {
             ranges::to<std::vector>();
         write_faces("boundary.obj", tet_mesh, boundary_faces);
     }
+    map_boundary_regions_to_tet_faces(boundary_mesh, boundary_vertices, tet_mesh);
     auto triangle_groups = build_triangle_groups(boundary_mesh, region_colors.size());
     write_msh("123.obj", tet_mesh);
     write_tet_msh("output.msh", tet_points, tet_indices);

@@ -825,9 +825,21 @@ void MaterialInterface::extract(
 
         if (face_props.keep) {
             if (pid < 4) {
-                // if (const auto mid = tet_mesh.face(tet.faces[pid]).prop().material; mid != gpf::kInvalidIndex) {
-                //     cells[face_props.cells[-2]].material = mid;
-                // }
+                if (const auto material = tet_mesh.face(tet.faces[pid]).prop().material;
+                    material != gpf::kInvalidIndex
+                ) {
+                    if (material != material_indices[cells[face_props.cells[0]].material - 4]) {
+                        std::size_t idx = gpf::kInvalidIndex;
+                        for (std::size_t i = 0; i < material_indices.size(); i++) {
+                            if (material == material_indices[i]) {
+                                idx = i;
+                                break;
+                            }
+                        }
+                        assert(idx != gpf::kInvalidIndex);
+                        cells[face_props.cells[0]].material = idx + 4;
+                    }
+                }
             }
             for (const auto he : face.halfedges()) {
                 he.to().data().property.global_id = 0;

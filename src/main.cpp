@@ -300,9 +300,12 @@ auto extract_color_boundaries(
         while (true) {
             auto he = curr_v.halfedge();
             auto next_v = he.to();
-            if (next_v.id == prev_vid || next_v.id == start_vid || !vertex_set.contains(next_v.id)) {
+            if (next_v.id == prev_vid || !vertex_set.contains(next_v.id)) {
                 break;
-            } else {
+            } else if (next_v.id == start_vid){
+                result.emplace_back(he.id);
+                break;
+            } else [[likely]] {
                 result.emplace_back(he.id);
                 prev_vid = curr_v.id;
                 curr_v = next_v;
@@ -1166,73 +1169,7 @@ void map_boundary_regions_to_tet_faces(
 }
 }
 
-template <typename Mesh>
-auto propagate_faces(Mesh& mesh, gpf::FaceId start_fid, std::size_t n_neighbors, std::size_t color_idx) {
-
-    std::vector<gpf::FaceId> faces{start_fid};
-    std::size_t start{0};
-    std::size_t end{faces.size()};
-    std::vector<bool> visited(mesh.n_faces_capacity(), false);
-    mesh.face(faces.front()).prop() = color_idx;
-    visited[faces.front().idx] = true;
-    for (std::size_t _ = 0; _ < n_neighbors; ++_) {
-        for (std::size_t i = start; i < end; ++i) {
-            for (const auto he : mesh.face(faces[i]).halfedges()) {
-                if (he.sibling().sibling().id != he.id) {
-                    continue;
-                }
-                auto face = he.sibling().face();
-                auto fid = face.id.idx;
-                if (!visited[fid]) {
-                    visited[fid] = true;
-                    face.prop() = color_idx;
-                    faces.push_back(face.id);
-                }
-            }
-        }
-        start = end;
-        end = faces.size();
-    }
-}
-
 int main(int argc, char* argv[]) {
-    std::vector<Point_3> points;
-    std::vector<std::vector<std::size_t>> faces_indices;
-    CGAL::IO::read_polygon_soup("RoseBear.obj", points, faces_indices);
-    auto mesh = gpf::SurfaceMesh<gpf::Empty, gpf::Empty, gpf::Empty, std::size_t>::new_in(faces_indices);
-    std::vector<std::vector<gpf::FaceId>> face_array;
-    std::vector<std::array<int, 3>> colors{{168, 168, 168}};
-    std::uniform_int_distribution<int> dist(0, 255);
-    std::mt19937 rng(42);
-    constexpr std::size_t n_neighbors = 20;
-    {
-        propagate_faces(mesh, gpf::FaceId{15741}, n_neighbors, 1);
-        colors.push_back({dist(rng), dist(rng), dist(rng)});
-    }
-    {
-        propagate_faces(mesh, gpf::FaceId{11717}, n_neighbors, 2);
-        colors.push_back({dist(rng), dist(rng), dist(rng)});
-    }
-    // Write colored OFF file
-    {
-        std::ofstream out("output.off");
-        std::println(out, "OFF");
-        std::println(out, "{} {} 0", points.size(), mesh.n_faces_capacity());
-        for (const auto& pt : points) {
-            std::println(out, "{} {} {}", pt.x(), pt.y(), pt.z());
-        }
-        for (auto face : mesh.faces()) {
-            std::print(out, "3");
-            for (const auto he : face.halfedges()) {
-                std::print(out, " {}", he.to().id.idx);
-            }
-            const auto& color = colors[face.prop()];
-            std::println(out, " {} {} {}", color[0], color[1], color[2]);
-        }
-    }
-}
-
-/*int main(int argc, char* argv[]) {
     CLI::App app { "multi-label-partition" };
     std::string mesh_path;
     std::string msh_path;
@@ -1269,9 +1206,6 @@ int main(int argc, char* argv[]) {
         auto boundary_faces = tet_mesh.faces() | views::filter([](auto f) { return f.prop().cells[1] == gpf::kInvalidIndex; }) |
             views::transform([](auto f) { return f.id; }) |
             ranges::to<std::vector>();
-        auto fid = boundary_faces[10033];
-        auto face_vertices = tet_mesh.face(fid).halfedges() | views::transform([](auto he) { return he.to().id.idx; }) |
-            ranges::to<std::vector>();
         write_faces("boundary.obj", tet_mesh, boundary_faces);
     }
     map_boundary_regions_to_tet_faces(boundary_mesh, boundary_vertices, tet_mesh);
@@ -1282,4 +1216,4 @@ int main(int argc, char* argv[]) {
     setup_neg_distance(tet_mesh, triangle_groups);
     do_material_interface(tets, tet_mesh);
     return 0;
-    }*/
+}

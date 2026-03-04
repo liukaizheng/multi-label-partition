@@ -412,7 +412,7 @@ private:
     double compute_vert_orientations(const gpf::VertexId vid);
     void split_edges() noexcept;
     void split_faces() noexcept;
-    void split_cells(const std::size_t max_v_idx) noexcept;
+    void split_cells() noexcept;
     void set_negative_face_properties(const gpf::FaceId fid, const std::size_t flag, const std::size_t new_cid, const std::size_t new_mid) noexcept;
     void merge_negative_cell_faces() noexcept;
 };
@@ -772,11 +772,9 @@ void MaterialInterface::add_material(const std::array<double, 4>& material) {
         return;
     }
 
-    const auto max_v_idx = mesh.n_vertices_capacity();
-
     split_edges();
     split_faces();
-    split_cells(max_v_idx);
+    split_cells();
     // auto face_vertices = mesh.faces() |
     //     views::transform([](const auto& face) {
     //         return views::transform(face.halfedges(), [](const auto& he) {
@@ -927,6 +925,9 @@ void MaterialInterface::extract(
                 auto t = a1b2 / (a1b2 + a2b1);
                 V.row(vid) = V.row(i1.idx) * (1.0 - t) + V.row(i2.idx) * t;
                 info.points.emplace_back(std::array<double, 3>{{V(vid, 0), V(vid, 1), V(vid, 2)}});
+                if (info.points.size() == 4975) {
+                    const auto a = 2;
+                }
                 info.point_on_boundary.emplace_back(on_bnd);
 
                 #ifndef NDEBUG
@@ -1226,7 +1227,7 @@ void MaterialInterface::set_negative_face_properties(
     }
 }
 
-void MaterialInterface::split_cells(const std::size_t max_v_idx) noexcept {
+void MaterialInterface::split_cells() noexcept {
     const auto mid = this->materials.size() + 3;
     const auto n_old_cells = cells.size();
     std::vector<std::size_t> neg_cell_faces;
@@ -1315,7 +1316,6 @@ void MaterialInterface::split_cells(const std::size_t max_v_idx) noexcept {
                 f_props.keep = true;
                 cells[cid].faces.clear();
                 neg_cell_faces.emplace_back(coplanar_ori_fid);
-                f_props.materials[1] = mid;
             } else {
                 mesh.face(new_fid).prop().keep = true;
             }
@@ -1452,8 +1452,8 @@ void do_material_interface(
 
         const auto& tvs = tet.vertices;
         if (ranges::count_if(tvs, [](const auto vid) {
-            return vid.idx == 25944 || vid.idx == 64597 || vid.idx == 25943 || vid.idx == 6465;
-        }) >= 3) {
+            return vid.idx == 45475 || vid.idx == 45576 || vid.idx == 29298 || vid.idx == 666;
+        }) >= 4) {
             const auto a = 2;
             save_tet(tid - 1, tets, tet_mesh);
         }

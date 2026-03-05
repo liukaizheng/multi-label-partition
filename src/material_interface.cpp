@@ -200,11 +200,13 @@ struct ExtractInfo {
 
     auto identify_chain_edges(const Mesh& mesh) {
         std::unordered_map<gpf::VertexId, std::vector<gpf::EdgeId>> vertex_edge_map{};
+        std::vector<gpf::EdgeId> all_candidate_edges;
         for (auto edge : mesh.edges()) {
             auto he = edge.halfedge();
             if (he.sibling().sibling().id != he.id) {
                 for (const auto vid : {he.from().id, he.to().id}) {
                     vertex_edge_map[vid].push_back(edge.id);
+                    all_candidate_edges.push_back(edge.id);
                 }
             }
         }
@@ -264,6 +266,20 @@ struct ExtractInfo {
                 ));
             }
         }
+
+        for (const auto eid : all_candidate_edges) {
+            if (edge_chain_indices[eid.idx] != gpf::kInvalidIndex) {
+                continue;
+            }
+            gpf::HalfedgeId start_hid = mesh.e_halfedge(eid);
+            const auto chain_id = chains.size();
+            chains.push_back(propagate_chain(
+                start_hid,
+                edge_chain_indices,
+                chain_id
+            ));
+        }
+
         return chains;
     }
 
@@ -376,7 +392,7 @@ struct ExtractInfo {
 
     auto extract_material_cells(const std::size_t n_materials) {
         const auto [patches, mesh] = extract_manifold_patches();
-        // smooth(mesh, patches);
+        smooth(mesh, patches);
         auto patch_materials = patches | views::transform([this](const auto& patch) {
             auto iter = ranges::find_if(patch, [this] (const auto fid) {
                 return face_materials[fid][0] != gpf::kInvalidIndex;
@@ -1030,7 +1046,7 @@ void MaterialInterface::extract(
         {
             const auto& face = info.faces.back();
             if (ranges::count_if(face, [](auto idx) {
-                return idx == 4907 || idx == 28 || idx == 5800;
+                return idx == 2498 || idx == 2037 || idx == 2499;
             }) >= 3) {
                 const auto a = 2;
             }
